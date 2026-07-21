@@ -281,6 +281,91 @@ class LifecycleTests(unittest.TestCase):
                 True,
             )
 
+    def test_retries_readiness_without_cancelling_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            watcher.notifiers = [Mock()]
+            session = Mock()
+            session.get.side_effect = [
+                response("ERROR_SQL"),
+                response("ACCESS_READY"),
+                response("STATUS_CANCEL"),
+            ]
+            watcher.stop.wait = Mock(return_value=False)
+            activation = bot.Activation("123", "447700900123", time.time(), "acquired")
+
+            watcher.wait_for_code(session, activation)
+
+            statuses = [call.kwargs["params"].get("status") for call in session.get.call_args_list]
+            self.assertEqual(statuses[:2], ["1", "1"])
+            self.assertNotIn("8", statuses)
+            self.assertEqual(watcher.store.load().phase, "failed")
+
+    def test_persists_failed_timeout_cancellation_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.return_value = True
+            watcher.stop.wait = Mock(side_effect=lambda _: watcher.stop.set())
+            session = Mock()
+            session.get.return_value = response("ERROR_SQL")
+            activation = bot.Activation(
+                "123",
+                "447700900123",
+                time.time() - 901,
+                "waiting_for_sms",
+            )
+
+            watcher.wait_for_code(session, activation)
+
+            self.assertEqual(watcher.store.load().phase, "cancellation_pending")
+
+    def test_resumes_pending_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            session = Mock()
+            session.get.return_value = response("ACCESS_CANCEL")
+            activation = bot.Activation(
+                "123", "447700900123", time.time(), "cancellation_pending"
+            )
+
+            watcher.wait_for_code(session, activation)
+
+            self.assertEqual(watcher.store.load().phase, "cancelled")
+
+    def test_reports_resend_requirement_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.return_value = True
+            watcher.stop.wait = Mock(side_effect=lambda _: watcher.stop.set())
+            session = Mock()
+            session.get.return_value = response("STATUS_WAIT_RESEND")
+            activation = bot.Activation(
+                "123", "447700900123", time.time(), "waiting_for_sms"
+            )
+
+            watcher.wait_for_code(session, activation)
+
+            self.assertEqual(watcher.store.load().phase, "resend_required")
+            watcher.notifiers[0].send.assert_called_once_with(
+                "Grizzly SMS resend required",
+                "Activation: 123\nStatus: STATUS_WAIT_RESEND",
+                True,
+            )
+
+    def test_stops_on_terminal_status_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            session = Mock()
+            session.get.return_value = response("BAD_KEY")
+            activation = bot.Activation(
+                "123", "447700900123", time.time(), "waiting_for_sms"
+            )
+
+            with self.assertRaisesRegex(ValueError, "BAD_KEY"):
+                watcher.wait_for_code(session, activation)
+
 
 if __name__ == "__main__":
     unittest.main()

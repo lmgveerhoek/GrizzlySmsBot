@@ -457,21 +457,22 @@ class Bot:
         self.stop.set()
 
     def wait_for_code(self, session: requests.Session, activation: Activation) -> None:
-        if activation.phase == "acquired" and not self.change_status(
-            session, activation, 1
-        ):
-            self.change_status(session, activation, 8)
-            self.finish(activation, "failed")
-            return
         if activation.phase == "acquired":
             activation = Activation(
                 activation.activation_id,
                 activation.phone_number,
                 activation.acquired_at,
-                "waiting_for_sms",
+                "ready_pending",
             )
             self.store.save(activation)
         while not self.stop.requested:
+            if activation.phase == "cancellation_pending":
+                if self.change_status(session, activation, 8):
+                    self.finish(activation, "cancelled")
+                    return
+                self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
             if activation.phase == "code_notification_pending":
                 if activation.sms_code is None:
                     LOG.error("pending code is missing activation=%s", activation.activation_id)
@@ -501,17 +502,47 @@ class Bot:
                 continue
 
             if time.time() - activation.acquired_at >= self.config.activation_timeout_seconds:
-                self.change_status(session, activation, 8)
+                activation = Activation(
+                    activation.activation_id,
+                    activation.phone_number,
+                    activation.acquired_at,
+                    "cancellation_pending",
+                )
+                self.store.save(activation)
                 self.send_notification(
                     "Grizzly SMS timed out",
                     f"Activation: {activation.activation_id}",
                     urgent=True,
                 )
-                self.finish(activation, "timed_out")
-                return
+                continue
+
+            if activation.phase == "ready_pending":
+                if self.change_status(session, activation, 1):
+                    activation = Activation(
+                        activation.activation_id,
+                        activation.phone_number,
+                        activation.acquired_at,
+                        "waiting_for_sms",
+                    )
+                    self.store.save(activation)
+                else:
+                    self.stop.wait(self.config.sms_poll_seconds)
+                continue
 
             status = self.get_status(session, activation)
-            if status is None or status == "STATUS_WAIT_CODE":
+            if status is None:
+                self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
+            if status == "STATUS_WAIT_CODE":
+                if activation.phase == "resend_required":
+                    activation = Activation(
+                        activation.activation_id,
+                        activation.phone_number,
+                        activation.acquired_at,
+                        "waiting_for_sms",
+                    )
+                    self.store.save(activation)
                 self.stop.wait(self.config.sms_poll_seconds)
                 continue
 
@@ -527,10 +558,30 @@ class Bot:
                 self.store.save(activation)
                 continue
 
+            if status.startswith("STATUS_WAIT_RETRY") or status == "STATUS_WAIT_RESEND":
+                if activation.phase != "resend_required":
+                    activation = Activation(
+                        activation.activation_id,
+                        activation.phone_number,
+                        activation.acquired_at,
+                        "resend_required",
+                    )
+                    self.store.save(activation)
+                    self.send_notification(
+                        "Grizzly SMS resend required",
+                        f"Activation: {activation.activation_id}\nStatus: {status}",
+                        urgent=True,
+                    )
+                self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
             if status in {"STATUS_CANCEL", "NO_ACTIVATION", "BAD_STATUS"}:
                 LOG.warning("activation ended status=%s", status)
                 self.finish(activation, "failed")
                 return
+
+            if status in {"BAD_KEY", "BAD_ACTION", "SERVICE_UNAVAILABLE_REGION"}:
+                raise ValueError(f"Grizzly terminal status error: {status}")
 
             LOG.warning("unexpected SMS status: %s", status[:100])
             self.stop.wait(self.config.sms_poll_seconds)
@@ -555,7 +606,10 @@ class Bot:
         activation = self.store.load()
         if activation and activation.phase in {
             "acquired",
+            "ready_pending",
             "waiting_for_sms",
+            "resend_required",
+            "cancellation_pending",
             "code_notification_pending",
             "code_delivered",
         }:
