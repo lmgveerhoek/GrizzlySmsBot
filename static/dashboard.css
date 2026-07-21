@@ -15,6 +15,22 @@
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f5f1;
+  --panel: #ffffff;
+  --panel-raised: #e9eee9;
+  --line: #cbd5cd;
+  --text: #162019;
+  --muted: #68736b;
+  --accent: #17683c;
+  --accent-ink: #ffffff;
+  --amber: #9a6400;
+  --red: #b83d37;
+  --green: #247449;
+  --blue: #275fa8;
+}
+
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
 button, input { font: inherit; }
@@ -35,11 +51,14 @@ h2 { margin-bottom: 0; font-size: 1.15rem; }
 .phase-pill { border-radius: 999px; padding: 7px 11px; background: var(--panel-raised); color: var(--blue); font-size: .78rem; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
 .countdown, .label, .activation-meta { color: var(--muted); font-size: .85rem; }
 .label { margin: 42px 0 8px; }
-.phone-number { margin-bottom: 34px; font-size: clamp(2rem, 8vw, 4.4rem); font-weight: 760; letter-spacing: -.05em; overflow-wrap: anywhere; }
+.number-display { margin-bottom: 34px; }
+.phone-number { margin-bottom: 14px; font-size: clamp(2rem, 8vw, 4.4rem); font-weight: 760; letter-spacing: -.05em; overflow-wrap: anywhere; user-select: all; }
+.copy-controls { display: flex; gap: 9px; flex-wrap: wrap; }
 .activation-meta { padding-top: 18px; border-top: 1px solid var(--line); }
 .actions { margin-top: 28px; flex-wrap: wrap; }
 .button { border: 0; border-radius: 10px; padding: 12px 17px; cursor: pointer; font-weight: 720; }
 .button:disabled { cursor: wait; opacity: .55; }
+.compact { padding: 9px 12px; font-size: .82rem; }
 .primary { background: var(--accent); color: var(--accent-ink); }
 .secondary { background: var(--panel-raised); color: var(--text); border: 1px solid var(--line); }
 .danger { background: var(--red); color: #30100e; }
@@ -48,6 +67,10 @@ h2 { margin-bottom: 0; font-size: 1.15rem; }
 .connection { color: var(--amber); font-size: .82rem; }
 .connection.online { color: var(--green); }
 .activity-card { padding: 24px; }
+.sms-card { padding: 24px; display: grid; gap: 20px; border-left: 5px solid var(--green); }
+.sms-content { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-raised); }
+.sms-message { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: clamp(1.8rem, 6vw, 3rem); font-weight: 750; letter-spacing: .08em; user-select: all; }
+.sms-note { margin: -8px 0 0; font-size: .8rem; }
 .events { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .events li { display: grid; grid-template-columns: 120px 1fr; gap: 14px; padding: 11px 0; border-top: 1px solid var(--line); color: var(--muted); }
 .events time { font-variant-numeric: tabular-nums; font-size: .78rem; }
@@ -73,4 +96,6 @@ dialog::backdrop { background: rgb(0 0 0 / 70%); }
   .activation-meta { align-items: flex-start; flex-direction: column; }
   .events li { grid-template-columns: 1fr; gap: 3px; }
   .actions .button { width: 100%; }
+  .copy-controls .button { width: 100%; }
+  .sms-content { align-items: stretch; flex-direction: column; }
 }

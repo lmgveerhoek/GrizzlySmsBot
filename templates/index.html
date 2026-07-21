@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>Grizzly SMS Bot</title>
+  <script>document.documentElement.dataset.theme = localStorage.getItem("grizzly-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");</script>
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
@@ -15,6 +16,7 @@
     </div>
     <div class="header-actions">
       <span id="connection" class="connection">Connecting</span>
+      <button id="theme-toggle" class="text-button" type="button" aria-label="Switch color theme">Light mode</button>
       <button id="logout" class="text-button" type="button">Sign out</button>
     </div>
   </header>
@@ -26,7 +28,13 @@
         <span id="countdown" class="countdown">No active timeout</span>
       </div>
       <p class="label">Current phone number</p>
-      <p id="phone-number" class="phone-number">No number acquired</p>
+      <div class="number-display">
+        <p id="phone-number" class="phone-number">No number acquired</p>
+        <div id="phone-copy-controls" class="copy-controls hidden">
+          <button id="copy-full" class="button secondary compact" type="button">Copy with country code</button>
+          <button id="copy-national" class="button secondary compact" type="button">Copy without country code</button>
+        </div>
+      </div>
       <div class="activation-meta">
         <span>Activation <strong id="activation-id">None</strong></span>
         <span>Elapsed <strong id="elapsed">0s</strong></span>
@@ -37,6 +45,18 @@
         <button id="cancel" class="button danger hidden" type="button">Cancel this number</button>
         <button id="retry" class="button secondary hidden" type="button">Retry now</button>
       </div>
+    </section>
+
+    <section id="sms-card" class="card sms-card hidden">
+      <div>
+        <p class="eyebrow">Received SMS</p>
+        <h2>Verification code</h2>
+      </div>
+      <div class="sms-content">
+        <p id="sms-message" class="sms-message"></p>
+        <button id="copy-sms" class="button secondary compact" type="button">Copy code</button>
+      </div>
+      <p class="muted sms-note">Grizzly's v1 API provides the extracted verification code rather than the full original message.</p>
     </section>
 
     <section class="card activity-card">
@@ -50,7 +70,7 @@
       <ol id="events" class="events"><li class="empty">No activity yet.</li></ol>
     </section>
 
-    <p class="privacy-note">Verification codes are sent through configured notifications and are never displayed in this dashboard.</p>
+    <p class="privacy-note">This authenticated dashboard displays received verification codes and retains the latest code until the next purchase.</p>
   </main>
 
   <dialog id="confirm-dialog">

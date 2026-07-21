@@ -866,9 +866,15 @@ class ActivationController:
                 if activation
                 else (None, None)
             )
+            phone_copy = (
+                f"+{''.join(character for character in activation.phone_number if character.isdigit())}"
+                if activation
+                else None
+            )
             return {
                 "phase": phase,
                 "phoneNumber": international,
+                "phoneNumberCopy": phone_copy,
                 "phoneNumberNational": national,
                 "activationId": activation.activation_id if activation else None,
                 "smsMessage": activation.sms_code if activation else None,

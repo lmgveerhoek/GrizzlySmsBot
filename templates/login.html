@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in | Grizzly SMS</title>
+  <script>document.documentElement.dataset.theme = localStorage.getItem("grizzly-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");</script>
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body class="login-page">

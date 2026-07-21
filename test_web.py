@@ -20,7 +20,10 @@ class WebUiTests(unittest.TestCase):
         self.controller.status.return_value = {
             "phase": "idle",
             "phoneNumber": None,
+            "phoneNumberCopy": None,
+            "phoneNumberNational": None,
             "activationId": None,
+            "smsMessage": None,
             "elapsedSeconds": 0,
             "timeoutRemainingSeconds": 0,
             "workerActive": False,
@@ -62,6 +65,9 @@ class WebUiTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Get another number", response.data)
+        self.assertIn(b"Copy with country code", response.data)
+        self.assertIn(b"Received SMS", response.data)
+        self.assertIn(b"theme-toggle", response.data)
 
     def test_status_returns_sanitized_controller_data(self) -> None:
         self.login()

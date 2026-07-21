@@ -1,8 +1,12 @@
 const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const elements = Object.fromEntries([
   "status-card", "phase", "countdown", "phone-number", "activation-id", "elapsed",
-  "last-error", "purchase", "cancel", "retry", "events", "connection", "toast"
+  "last-error", "purchase", "cancel", "retry", "events", "connection", "toast",
+  "phone-copy-controls", "copy-full", "copy-national", "sms-card", "sms-message",
+  "copy-sms", "theme-toggle"
 ].map(id => [id, document.getElementById(id)]));
+let copyValues = {full: "", national: "", sms: ""};
+let eventsSignature = "";
 
 const labels = {
   idle: "Idle", acquired: "Number acquired", ready_pending: "Confirming readiness",
@@ -19,25 +23,41 @@ function duration(seconds) {
 }
 
 function visible(element, show) { element.classList.toggle("hidden", !show); }
+function setText(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
 
 function render(status) {
   const phase = status.phase || "idle";
   elements["status-card"].className = `card status-card state-${phase}`;
-  elements.phase.textContent = labels[phase] || phase.replaceAll("_", " ");
-  elements["phone-number"].textContent = status.phoneNumber || "No number acquired";
-  elements["activation-id"].textContent = status.activationId || "None";
-  elements.elapsed.textContent = duration(status.elapsedSeconds);
-  elements.countdown.textContent = status.activationId
+  setText(elements.phase, labels[phase] || phase.replaceAll("_", " "));
+  setText(elements["phone-number"], status.phoneNumber || "No number acquired");
+  setText(elements["activation-id"], status.activationId || "None");
+  setText(elements.elapsed, duration(status.elapsedSeconds));
+  setText(elements.countdown, status.activationId
     ? `${duration(status.timeoutRemainingSeconds)} remaining`
-    : "No active timeout";
-  elements["last-error"].textContent = status.lastError || "";
+    : "No active timeout");
+  setText(elements["last-error"], status.lastError || "");
   visible(elements["last-error"], Boolean(status.lastError));
+  copyValues = {
+    full: status.phoneNumberCopy || status.phoneNumber || "",
+    national: status.phoneNumberNational || "",
+    sms: status.smsMessage || ""
+  };
+  visible(elements["phone-copy-controls"], Boolean(copyValues.full));
+  visible(elements["copy-national"], Boolean(copyValues.national));
+  visible(elements["sms-card"], Boolean(copyValues.sms));
+  setText(elements["sms-message"], copyValues.sms);
   visible(elements.purchase, status.canPurchase);
   visible(elements.cancel, status.canCancel);
   visible(elements.retry, status.canRetry);
-  elements.events.innerHTML = status.events.length
-    ? status.events.map(event => `<li><time>${new Date(event.time).toLocaleTimeString()}</time><span class="${event.level}">${escapeHtml(event.message)}</span></li>`).join("")
-    : '<li class="empty">No activity yet.</li>';
+  const nextEventsSignature = JSON.stringify(status.events);
+  if (eventsSignature !== nextEventsSignature) {
+    eventsSignature = nextEventsSignature;
+    elements.events.innerHTML = status.events.length
+      ? status.events.map(event => `<li><time>${new Date(event.time).toLocaleTimeString()}</time><span class="${event.level}">${escapeHtml(event.message)}</span></li>`).join("")
+      : '<li class="empty">No activity yet.</li>';
+  }
 }
 
 function escapeHtml(value) {
@@ -85,6 +105,29 @@ function showToast(message) {
   window.setTimeout(() => visible(elements.toast, false), 3500);
 }
 
+async function copyToClipboard(value, label) {
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch (error) {
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+  showToast(`${label} copied`);
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("grizzly-theme", theme);
+  setText(elements["theme-toggle"], theme === "dark" ? "Light mode" : "Dark mode");
+}
+
 function confirmAction(title, message, confirmLabel, callback) {
   const dialog = document.getElementById("confirm-dialog");
   document.getElementById("dialog-title").textContent = title;
@@ -103,11 +146,18 @@ elements.cancel.addEventListener("click", () => confirmAction(
   () => postAction("/api/actions/cancel", {confirm: true})
 ));
 elements.retry.addEventListener("click", () => postAction("/api/actions/retry"));
+elements["copy-full"].addEventListener("click", () => copyToClipboard(copyValues.full, "International number"));
+elements["copy-national"].addEventListener("click", () => copyToClipboard(copyValues.national, "National number"));
+elements["copy-sms"].addEventListener("click", () => copyToClipboard(copyValues.sms, "Verification code"));
+elements["theme-toggle"].addEventListener("click", () => applyTheme(
+  document.documentElement.dataset.theme === "dark" ? "light" : "dark"
+));
 document.getElementById("refresh").addEventListener("click", refresh);
 document.getElementById("logout").addEventListener("click", async () => {
   await postAction("/logout");
   window.location = "/login";
 });
 
+applyTheme(document.documentElement.dataset.theme || "dark");
 refresh();
 window.setInterval(refresh, 2000);

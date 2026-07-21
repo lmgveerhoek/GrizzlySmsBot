@@ -228,6 +228,7 @@ class LifecycleTests(unittest.TestCase):
 
             self.assertTrue(watcher.stop.requested)
             self.assertEqual(watcher.store.load().phase, "completed")
+            self.assertEqual(watcher.store.load().sms_code, "123456")
             watcher.notifiers[0].send.assert_called_once_with(
                 "GRIZZLY SMS CODE RECEIVED",
                 "Code: 123456\nActivation: 123",
@@ -511,6 +512,7 @@ class ActivationControllerTests(unittest.TestCase):
             status = controller.status()
 
             self.assertEqual(status["phoneNumber"], "+90 531 439 39 88")
+            self.assertEqual(status["phoneNumberCopy"], "+905314393988")
             self.assertEqual(status["phoneNumberNational"], "5314393988")
             self.assertEqual(status["smsMessage"], "123456")
 
