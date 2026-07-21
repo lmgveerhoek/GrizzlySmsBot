@@ -66,6 +66,20 @@ shows the configured **Allowed providers** rather than claiming which provider w
 used. Tracking starts with purchases made after this update; older activations cannot
 be reconstructed with reliable price/provider metadata.
 
+### Auto-Retry
+
+When enabled, the bot automatically cancels an activation if no SMS arrives within
+the configured timeout (3 minutes by default), waits a short delay, plays a retry
+sound in the browser, and acquires a new number. The loop continues until either:
+
+- A code is successfully received
+- You disable the toggle in the dashboard
+- A terminal Grizzly error occurs (e.g., `BAD_KEY`)
+
+The retry sound plays only while the dashboard tab is open. Enable it via the
+`AUTO_RETRY_ENABLED` environment variable or toggle it at runtime from the
+dashboard header.
+
 ## Quick Start
 
 ```bash
@@ -79,7 +93,7 @@ GRIZZLY_API_KEY=your_grizzly_api_key
 SERVICE=wx
 COUNTRY=62
 MAX_PRICE=2
-PROVIDER_IDS=311
+PROVIDER_IDS=311,415
 
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 DISCORD_MAX_RETRIES=5
@@ -89,6 +103,10 @@ NTFY_MAX_RETRIES=5
 WEB_UI=true
 UI_PASSWORD=replace_with_a_long_local_password
 WEB_UI_PORT=8080
+
+AUTO_RETRY_ENABLED=false
+AUTO_RETRY_TIMEOUT_SECONDS=180
+AUTO_RETRY_DELAY_SECONDS=5
 
 MAX_REQUESTS_PER_SECOND=2
 REQUEST_TIMEOUT_SECONDS=10
@@ -160,6 +178,9 @@ be overridden in `.env`.
 | `WEB_UI` | no | Enable the local dashboard and explicit-purchase mode. Defaults to `false`. |
 | `UI_PASSWORD` | with Web UI | Password required to access the dashboard. |
 | `WEB_UI_PORT` | no | Host loopback port for the dashboard. Defaults to `8080`. |
+| `AUTO_RETRY_ENABLED` | no | Enable automatic retry after timeout. Defaults to `false`. |
+| `AUTO_RETRY_TIMEOUT_SECONDS` | no | Timeout before auto-retry cancels. Defaults to `180`. |
+| `AUTO_RETRY_DELAY_SECONDS` | no | Delay between cancellation and next attempt. Defaults to `5`. |
 
 Set `WEB_UI=false` to retain headless behavior: the process immediately looks for
 one number, follows its lifecycle, and exits after completion or failure.

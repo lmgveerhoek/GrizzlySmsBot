@@ -103,6 +103,11 @@ def create_app(
     def retry():
         return action("retry_pending_work")
 
+    @app.post("/api/actions/toggle-auto-retry")
+    @authenticated
+    def toggle_auto_retry():
+        return action("toggle_auto_retry")
+
     return app
 
 

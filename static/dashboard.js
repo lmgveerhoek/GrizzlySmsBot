@@ -4,11 +4,57 @@ const elements = Object.fromEntries([
   "last-error", "purchase", "cancel", "retry", "events", "connection", "toast",
   "phone-copy-controls", "copy-full", "copy-national", "sms-card", "sms-message",
   "copy-sms", "theme-toggle", "summary-attempts", "summary-successes",
-  "summary-unsuccessful", "summary-cost", "history-rows"
+  "summary-unsuccessful", "summary-cost", "history-rows", "auto-retry-toggle"
 ].map(id => [id, document.getElementById(id)]));
+
 let copyValues = {full: "", national: "", sms: ""};
 let eventsSignature = "";
 let historySignature = "";
+let lastPhase = null;
+let audioContext = null;
+
+function getAudioContext() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return audioContext;
+}
+
+function playRetrySound() {
+  try {
+    const ctx = getAudioContext();
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    oscillator.frequency.value = 440;
+    oscillator.type = 'sine';
+    gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+    oscillator.start(ctx.currentTime);
+    oscillator.stop(ctx.currentTime + 0.5);
+  } catch (error) {
+    console.error('Failed to play retry sound:', error);
+  }
+}
+
+function playSuccessSound() {
+  try {
+    const ctx = getAudioContext();
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    oscillator.frequency.value = 880;
+    oscillator.type = 'sine';
+    gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+    oscillator.start(ctx.currentTime);
+    oscillator.stop(ctx.currentTime + 0.3);
+  } catch (error) {
+    console.error('Failed to play success sound:', error);
+  }
+}
 
 const labels = {
   idle: "Idle", acquired: "Number acquired", ready_pending: "Confirming readiness",
@@ -31,6 +77,17 @@ function setText(element, value) {
 
 function render(status) {
   const phase = status.phase || "idle";
+
+  // Detect phase transitions and play sounds
+  if (lastPhase !== null) {
+    if (phase === "waiting_for_sms" && lastPhase !== "waiting_for_sms") {
+      playRetrySound();
+    } else if (phase === "completed" && lastPhase !== "completed") {
+      playSuccessSound();
+    }
+  }
+  lastPhase = phase;
+
   elements["status-card"].className = `card status-card state-${phase}`;
   setText(elements.phase, labels[phase] || phase.replaceAll("_", " "));
   setText(elements["phone-number"], status.phoneNumber || "No number acquired");
@@ -53,6 +110,12 @@ function render(status) {
   visible(elements.purchase, status.canPurchase);
   visible(elements.cancel, status.canCancel);
   visible(elements.retry, status.canRetry);
+
+  // Sync auto-retry toggle state
+  if (elements["auto-retry-toggle"].checked !== status.autoRetryEnabled) {
+    elements["auto-retry-toggle"].checked = status.autoRetryEnabled;
+  }
+
   const nextEventsSignature = JSON.stringify(status.events);
   if (eventsSignature !== nextEventsSignature) {
     eventsSignature = nextEventsSignature;
@@ -173,6 +236,7 @@ elements.cancel.addEventListener("click", () => confirmAction(
   () => postAction("/api/actions/cancel", {confirm: true})
 ));
 elements.retry.addEventListener("click", () => postAction("/api/actions/retry"));
+elements["auto-retry-toggle"].addEventListener("change", () => postAction("/api/actions/toggle-auto-retry"));
 elements["copy-full"].addEventListener("click", () => copyToClipboard(copyValues.full, "International number"));
 elements["copy-national"].addEventListener("click", () => copyToClipboard(copyValues.national, "National number"));
 elements["copy-sms"].addEventListener("click", () => copyToClipboard(copyValues.sms, "Verification code"));

@@ -30,6 +30,7 @@ class WebUiTests(unittest.TestCase):
             "canPurchase": True,
             "canCancel": False,
             "canRetry": False,
+            "autoRetryEnabled": False,
             "lastError": None,
             "events": [],
             "history": [],
@@ -77,6 +78,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn(b"theme-toggle", response.data)
         self.assertIn(b"Numbers tried", response.data)
         self.assertIn(b"Allowed providers", response.data)
+        self.assertIn(b"auto-retry-toggle", response.data)
 
     def test_status_returns_sanitized_controller_data(self) -> None:
         self.login()
@@ -118,6 +120,17 @@ class WebUiTests(unittest.TestCase):
             headers={"X-CSRF-Token": csrf},
         )
         self.assertEqual(response.status_code, 409)
+
+    def test_toggle_auto_retry_endpoint(self) -> None:
+        csrf = self.login()
+        self.controller.toggle_auto_retry.return_value = True, "Auto-retry toggled"
+        response = self.client.post(
+            "/api/actions/toggle-auto-retry",
+            json={},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.controller.toggle_auto_retry.assert_called_once_with()
 
     def test_web_server_uses_single_thread_and_quiet_access_logs(self) -> None:
         app = Mock()

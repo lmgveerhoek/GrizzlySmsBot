@@ -64,6 +64,13 @@ h2 { margin-bottom: 0; font-size: 1.15rem; }
 .danger { background: var(--red); color: #30100e; }
 .text-button { padding: 6px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .text-button:hover { color: var(--text); }
+.switch { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.switch input { display: none; }
+.switch-slider { width: 40px; height: 22px; background: var(--line); border-radius: 11px; position: relative; transition: background 0.3s; }
+.switch-slider::after { content: ""; width: 18px; height: 18px; background: var(--text); border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: transform 0.3s; }
+.switch input:checked + .switch-slider { background: var(--accent); }
+.switch input:checked + .switch-slider::after { transform: translateX(18px); }
+.switch-label { color: var(--muted); font-size: 0.85rem; }
 .connection { color: var(--amber); font-size: .82rem; }
 .connection.online { color: var(--green); }
 .activity-card, .history-card { padding: 24px; }

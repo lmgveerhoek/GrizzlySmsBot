@@ -590,6 +590,91 @@ class ActivationControllerTests(unittest.TestCase):
             self.assertEqual(status["phoneNumberNational"], "5314393988")
             self.assertEqual(status["smsMessage"], "123456")
 
+    def test_auto_retry_toggle_works(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+
+            self.assertFalse(controller.status()["autoRetryEnabled"])
+
+            accepted, message = controller.toggle_auto_retry()
+
+            self.assertTrue(accepted)
+            self.assertEqual(message, "Auto-retry toggled")
+            self.assertTrue(controller.status()["autoRetryEnabled"])
+
+            accepted, message = controller.toggle_auto_retry()
+
+            self.assertTrue(accepted)
+            self.assertFalse(controller.status()["autoRetryEnabled"])
+
+    def test_auto_retry_continues_after_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.auto_retry_enabled = True
+            controller._start_worker = Mock()
+            controller.store.save(
+                bot.Activation("123", "447700900123", time.time(), "cancelled")
+            )
+
+            # Simulate worker completion
+            watcher = Mock()
+            watcher.stop = Mock()
+            watcher.stop.wait = Mock(return_value=False)
+            watcher.close = Mock()
+
+            controller._run_worker(watcher, acquire_if_idle=True)
+
+            # Should have started a new worker after delay
+            controller._start_worker.assert_called_once_with(acquire_if_idle=True)
+
+    def test_auto_retry_stops_on_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.auto_retry_enabled = True
+            controller._start_worker = Mock()
+            controller.store.save(
+                bot.Activation("123", "447700900123", time.time(), "completed")
+            )
+
+            # Simulate worker completion
+            watcher = Mock()
+            watcher.stop = Mock()
+            watcher.stop.wait = Mock(return_value=False)
+            watcher.close = Mock()
+
+            controller._run_worker(watcher, acquire_if_idle=True)
+
+            # Should NOT have started a new worker
+            controller._start_worker.assert_not_called()
+
+    def test_auto_retry_stops_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.auto_retry_enabled = False
+            controller._start_worker = Mock()
+            controller.store.save(
+                bot.Activation("123", "447700900123", time.time(), "cancelled")
+            )
+
+            # Simulate worker completion
+            watcher = Mock()
+            watcher.stop = Mock()
+            watcher.stop.wait = Mock(return_value=False)
+            watcher.close = Mock()
+
+            controller._run_worker(watcher, acquire_if_idle=True)
+
+            # Should NOT have started a new worker
+            controller._start_worker.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

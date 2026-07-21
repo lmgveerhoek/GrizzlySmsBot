@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -91,6 +91,9 @@ class Config:
     web_ui_port: int = 8080
     debug_logs: bool = False
     web_request_logs: bool = False
+    auto_retry_enabled: bool = False
+    auto_retry_timeout_seconds: int = 180
+    auto_retry_delay_seconds: int = 5
     api_url: str = API_URL
 
     @classmethod
@@ -123,6 +126,9 @@ class Config:
             web_ui_port=env_int_optional("WEB_UI_PORT", 8080),
             debug_logs=env_bool("DEBUG_LOGS"),
             web_request_logs=env_bool("WEB_REQUEST_LOGS"),
+            auto_retry_enabled=env_bool("AUTO_RETRY_ENABLED"),
+            auto_retry_timeout_seconds=env_int_optional("AUTO_RETRY_TIMEOUT_SECONDS", 180),
+            auto_retry_delay_seconds=env_int_optional("AUTO_RETRY_DELAY_SECONDS", 5),
             api_url=os.getenv("GRIZZLY_API_URL", API_URL),
         )
 
@@ -905,6 +911,7 @@ class ActivationController:
         self.bot: Bot | None = None
         self.events: deque[dict[str, str]] = deque(maxlen=50)
         self.last_error: str | None = None
+        self.auto_retry_enabled = config.auto_retry_enabled
 
     def add_event(self, message: str, level: str = "info") -> None:
         with self.lock:
@@ -935,7 +942,13 @@ class ActivationController:
         with self.lock:
             if self.worker and self.worker.is_alive():
                 raise RuntimeError("Activation work is already running")
-            self.bot = Bot(self.config)
+            bot_config = self.config
+            if self.auto_retry_enabled:
+                bot_config = replace(
+                    self.config,
+                    activation_timeout_seconds=self.config.auto_retry_timeout_seconds,
+                )
+            self.bot = Bot(bot_config)
             self.worker = threading.Thread(
                 target=self._run_worker,
                 args=(self.bot, acquire_if_idle),
@@ -960,6 +973,17 @@ class ActivationController:
             with self.lock:
                 if self.bot is watcher:
                     self.bot = None
+                should_retry = (
+                    self.auto_retry_enabled
+                    and activation
+                    and activation.phase != "completed"
+                    and activation.phase not in ACTIVE_PHASES
+                )
+            if should_retry:
+                self.add_event("Auto-retry: waiting before next attempt")
+                if not watcher.stop.wait(self.config.auto_retry_delay_seconds):
+                    self.add_event("Auto-retry: starting next attempt")
+                    self._start_worker(acquire_if_idle=True)
 
     def start_purchase(self) -> tuple[bool, str]:
         with self.lock:
@@ -1004,6 +1028,14 @@ class ActivationController:
             self._start_worker(acquire_if_idle=False)
             return True, "Retry started"
 
+    def toggle_auto_retry(self) -> tuple[bool, str]:
+        with self.lock:
+            self.auto_retry_enabled = not self.auto_retry_enabled
+            self.add_event(
+                "Auto-retry enabled" if self.auto_retry_enabled else "Auto-retry disabled"
+            )
+            return True, "Auto-retry toggled"
+
     def status(self) -> dict[str, object]:
         with self.lock:
             activation = self.store.load()
@@ -1040,6 +1072,7 @@ class ActivationController:
                 "canPurchase": not active and not worker_active,
                 "canCancel": active and phase != "cancellation_pending",
                 "canRetry": retryable,
+                "autoRetryEnabled": self.auto_retry_enabled,
                 "lastError": self.last_error,
                 "events": list(self.events),
                 "history": self.store.history(),
