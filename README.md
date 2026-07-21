@@ -140,6 +140,8 @@ be overridden in `.env`.
 | `ACTIVATION_TIMEOUT_SECONDS` | no | Maximum wait for an SMS. Defaults to `900`. |
 | `STATE_DB_PATH` | no | SQLite state path. Docker defaults to `/data/grizzlysms.db`. |
 | `LOG_LEVEL` | no | Python logging level, such as `INFO` or `DEBUG`. |
+| `DEBUG_LOGS` | no | Enable additional application diagnostics. Defaults to `false`. |
+| `WEB_REQUEST_LOGS` | no | Log every dashboard HTTP request. Defaults to `false`. |
 | `GRIZZLY_API_URL` | no | Override the Grizzly endpoint for testing. |
 | `WEB_UI` | no | Enable the local dashboard and explicit-purchase mode. Defaults to `false`. |
 | `UI_PASSWORD` | with Web UI | Password required to access the dashboard. |
@@ -147,6 +149,11 @@ be overridden in `.env`.
 
 Set `WEB_UI=false` to retain headless behavior: the process immediately looks for
 one number, follows its lifecycle, and exits after completion or failure.
+
+The dashboard polls its status endpoint every two seconds. Request logging is off
+by default to keep this routine traffic out of Docker logs. Set
+`WEB_REQUEST_LOGS=true` when debugging HTTP behavior, and `DEBUG_LOGS=true` for
+additional application diagnostics.
 
 ## Running Without Docker
 

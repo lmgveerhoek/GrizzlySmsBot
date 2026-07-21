@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import secrets
 from functools import wraps
 from typing import Callable
@@ -106,10 +107,13 @@ def create_app(
 
 
 def run_web_ui(config: Config) -> int:
+    logging.getLogger("werkzeug").setLevel(
+        logging.INFO if config.web_request_logs else logging.WARNING
+    )
     controller = ActivationController(config)
     app = create_app(config, controller)
     try:
-        app.run(host=config.web_ui_host, port=config.web_ui_port, threaded=True)
+        app.run(host=config.web_ui_host, port=config.web_ui_port, threaded=False)
     finally:
         controller.shutdown()
     return 0

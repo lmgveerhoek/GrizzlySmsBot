@@ -87,6 +87,8 @@ class Config:
     ui_password: str | None = None
     web_ui_host: str = "127.0.0.1"
     web_ui_port: int = 8080
+    debug_logs: bool = False
+    web_request_logs: bool = False
     api_url: str = API_URL
 
     @classmethod
@@ -117,6 +119,8 @@ class Config:
             ui_password=ui_password,
             web_ui_host=os.getenv("WEB_UI_HOST", "127.0.0.1"),
             web_ui_port=env_int_optional("WEB_UI_PORT", 8080),
+            debug_logs=env_bool("DEBUG_LOGS"),
+            web_request_logs=env_bool("WEB_REQUEST_LOGS"),
             api_url=os.getenv("GRIZZLY_API_URL", API_URL),
         )
 
@@ -904,6 +908,9 @@ def main() -> int:
     except (ValueError, OSError) as error:
         LOG.error("startup failed: %s", error)
         return 2
+
+    if config.debug_logs:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     if config.web_ui:
         from web import run_web_ui

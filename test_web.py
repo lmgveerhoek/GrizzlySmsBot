@@ -2,10 +2,10 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from test_bot import config
-from web import create_app
+from web import create_app, run_web_ui
 
 
 class WebUiTests(unittest.TestCase):
@@ -109,6 +109,21 @@ class WebUiTests(unittest.TestCase):
             headers={"X-CSRF-Token": csrf},
         )
         self.assertEqual(response.status_code, 409)
+
+    def test_web_server_uses_single_thread_and_quiet_access_logs(self) -> None:
+        app = Mock()
+        controller = Mock()
+        with patch("web.ActivationController", return_value=controller), patch(
+            "web.create_app", return_value=app
+        ):
+            self.assertEqual(run_web_ui(self.config), 0)
+
+        app.run.assert_called_once_with(
+            host=self.config.web_ui_host,
+            port=self.config.web_ui_port,
+            threaded=False,
+        )
+        controller.shutdown.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -108,6 +108,28 @@ class ConfigTests(unittest.TestCase):
             parsed = bot.Config.from_env()
             self.assertEqual(parsed.sms_poll_seconds, 5)
             self.assertIsNone(parsed.ntfy_url)
+            self.assertFalse(parsed.debug_logs)
+            self.assertFalse(parsed.web_request_logs)
+
+    def test_debug_logging_flags(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GRIZZLY_API_KEY": "key",
+                "SERVICE": "wx",
+                "COUNTRY": "62",
+                "MAX_PRICE": "2",
+                "MAX_REQUESTS_PER_SECOND": "1",
+                "REQUEST_TIMEOUT_SECONDS": "1",
+                "DISCORD_WEBHOOK_URL": "https://example.test/webhook",
+                "DEBUG_LOGS": "true",
+                "WEB_REQUEST_LOGS": "true",
+            },
+            clear=True,
+        ):
+            parsed = bot.Config.from_env()
+            self.assertTrue(parsed.debug_logs)
+            self.assertTrue(parsed.web_request_logs)
 
     def test_web_ui_requires_password(self) -> None:
         with patch.dict(
