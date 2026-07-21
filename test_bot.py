@@ -50,6 +50,12 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(bot.parse_code("STATUS_OK:123456"), "123456")
         self.assertIsNone(bot.parse_code("STATUS_WAIT_CODE"))
 
+    def test_formats_international_and_national_phone_number(self) -> None:
+        self.assertEqual(
+            bot.phone_representations("905314393988"),
+            ("+90 531 439 39 88", "5314393988"),
+        )
+
 
 class StateStoreTests(unittest.TestCase):
     def test_persists_activation(self) -> None:
@@ -467,7 +473,7 @@ class ActivationControllerTests(unittest.TestCase):
             self.assertEqual(controller.store.load().phase, "cancellation_pending")
             controller._start_worker.assert_called_once_with(acquire_if_idle=False)
 
-    def test_status_never_exposes_pending_sms_code(self) -> None:
+    def test_status_exposes_pending_sms_code_to_authenticated_ui(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             controller = bot.ActivationController(
                 config(str(Path(directory) / "state.db"))
@@ -485,7 +491,28 @@ class ActivationControllerTests(unittest.TestCase):
             status = controller.status()
 
             self.assertNotIn("smsCode", status)
-            self.assertNotIn("123456", repr(status))
+            self.assertEqual(status["smsMessage"], "123456")
+
+    def test_completed_activation_keeps_code_for_authenticated_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.store.save(
+                bot.Activation(
+                    "123",
+                    "905314393988",
+                    time.time(),
+                    "completed",
+                    "123456",
+                )
+            )
+
+            status = controller.status()
+
+            self.assertEqual(status["phoneNumber"], "+90 531 439 39 88")
+            self.assertEqual(status["phoneNumberNational"], "5314393988")
+            self.assertEqual(status["smsMessage"], "123456")
 
 
 if __name__ == "__main__":

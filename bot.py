@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+import phonenumbers
 from requests.adapters import HTTPAdapter
 
 
@@ -163,6 +164,23 @@ def parse_code(body: str) -> str | None:
     if body.startswith(prefix) and body[len(prefix) :]:
         return body[len(prefix) :]
     return None
+
+
+def phone_representations(phone_number: str) -> tuple[str, str]:
+    digits = "".join(character for character in phone_number if character.isdigit())
+    candidate = f"+{digits}"
+    try:
+        parsed = phonenumbers.parse(candidate, None)
+        if phonenumbers.is_possible_number(parsed):
+            return (
+                phonenumbers.format_number(
+                    parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL
+                ),
+                str(parsed.national_number),
+            )
+    except phonenumbers.NumberParseException:
+        pass
+    return candidate, digits
 
 
 @dataclass(frozen=True)
@@ -483,13 +501,14 @@ class Bot:
         return response.text.strip()
 
     def finish(self, activation: Activation, phase: str) -> None:
+        sms_code = activation.sms_code if phase == "completed" else None
         self.store.save(
             Activation(
                 activation.activation_id,
                 activation.phone_number,
                 activation.acquired_at,
                 phase,
-                None,
+                sms_code,
             )
         )
         self.stop.set()
@@ -565,6 +584,7 @@ class Bot:
                         activation.phone_number,
                         activation.acquired_at,
                         "code_delivered",
+                        activation.sms_code,
                     )
                     self.store.save(activation)
                 else:
@@ -841,10 +861,17 @@ class ActivationController:
             )
             active = bool(activation and phase in ACTIVE_PHASES)
             retryable = active and not worker_active
+            international, national = (
+                phone_representations(activation.phone_number)
+                if activation
+                else (None, None)
+            )
             return {
                 "phase": phase,
-                "phoneNumber": activation.phone_number if activation else None,
+                "phoneNumber": international,
+                "phoneNumberNational": national,
                 "activationId": activation.activation_id if activation else None,
+                "smsMessage": activation.sms_code if activation else None,
                 "elapsedSeconds": elapsed,
                 "timeoutRemainingSeconds": remaining,
                 "workerActive": worker_active,
