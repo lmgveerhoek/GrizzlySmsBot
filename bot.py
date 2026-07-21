@@ -4,8 +4,11 @@ import logging
 import os
 import signal
 import sqlite3
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -14,6 +17,15 @@ from requests.adapters import HTTPAdapter
 
 LOG = logging.getLogger("grizzlysms")
 API_URL = "https://api.grizzlysms.com/stubs/handler_api.php"
+ACTIVE_PHASES = {
+    "acquired",
+    "ready_pending",
+    "waiting_for_sms",
+    "resend_required",
+    "cancellation_pending",
+    "code_notification_pending",
+    "code_delivered",
+}
 
 
 def env_required(name: str) -> str:
@@ -461,7 +473,28 @@ class Bot:
         )
         self.stop.set()
 
+    def request_cancel(self) -> bool:
+        activation = self.store.load()
+        if not activation or activation.phase not in ACTIVE_PHASES:
+            return False
+        self.store.save(
+            Activation(
+                activation.activation_id,
+                activation.phone_number,
+                activation.acquired_at,
+                "cancellation_pending",
+            )
+        )
+        return True
+
     def wait_for_code(self, session: requests.Session, activation: Activation) -> None:
+        persisted = self.store.load()
+        if (
+            persisted
+            and persisted.activation_id == activation.activation_id
+            and persisted.phase == "cancellation_pending"
+        ):
+            activation = persisted
         if activation.phase == "acquired":
             activation = Activation(
                 activation.activation_id,
@@ -471,6 +504,14 @@ class Bot:
             )
             self.store.save(activation)
         while not self.stop.requested:
+            persisted = self.store.load()
+            if (
+                persisted
+                and persisted.activation_id == activation.activation_id
+                and persisted.phase == "cancellation_pending"
+            ):
+                activation = persisted
+
             if activation.phase == "cancellation_pending":
                 if self.change_status(session, activation, 8):
                     self.finish(activation, "cancelled")
@@ -591,7 +632,7 @@ class Bot:
             LOG.warning("unexpected SMS status: %s", status[:100])
             self.stop.wait(self.config.sms_poll_seconds)
 
-    def run(self) -> None:
+    def send_startup_notification(self) -> bool:
         cfg = self.config
         LOG.info(
             "startup service=%s country=%s maxPrice=%s providerIds=%s "
@@ -607,28 +648,34 @@ class Bot:
             f"Bot active: one-shot mode, limit {cfg.rate:g} req/s.",
         )
         LOG.info("Discord test: %s", "OK" if result else "FAILED")
+        return result
+
+    def run(self, acquire_if_idle: bool = True, notify_startup: bool = True) -> None:
+        if notify_startup:
+            self.send_startup_notification()
 
         activation = self.store.load()
-        if activation and activation.phase in {
-            "acquired",
-            "ready_pending",
-            "waiting_for_sms",
-            "resend_required",
-            "cancellation_pending",
-            "code_notification_pending",
-            "code_delivered",
-        }:
+        if activation and activation.phase in ACTIVE_PHASES:
             LOG.info("resuming activation=%s", activation.activation_id)
         elif activation:
+            if not acquire_if_idle:
+                return
             LOG.info("clearing terminal activation=%s", activation.activation_id)
             self.store.clear()
             activation = None
 
+        if activation is None and not acquire_if_idle:
+            return
+
         with new_session() as session:
+            acquired_now = activation is None
             while activation is None and self.limiter.wait(self.stop):
                 activation = self.acquire(session)
             if activation is None or self.stop.requested:
                 return
+
+            if acquired_now:
+                self.store.save(activation)
 
             if activation.phase == "acquired" and not self.notify_purchase(
                 activation.activation_id, activation.phone_number
@@ -640,6 +687,147 @@ class Bot:
         self.stop.set()
         for notifier in self.notifiers:
             notifier.close()
+
+
+class ActivationController:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.store = StateStore(config.state_db_path)
+        self.lock = threading.RLock()
+        self.worker: threading.Thread | None = None
+        self.bot: Bot | None = None
+        self.events: deque[dict[str, str]] = deque(maxlen=50)
+        self.last_error: str | None = None
+
+    def add_event(self, message: str, level: str = "info") -> None:
+        with self.lock:
+            self.events.appendleft(
+                {
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "level": level,
+                    "message": message,
+                }
+            )
+
+    def start(self) -> None:
+        notifier = Bot(self.config)
+        try:
+            delivered = notifier.send_startup_notification()
+            self.add_event(
+                "Notification test delivered" if delivered else "Notification test failed",
+                "info" if delivered else "warning",
+            )
+        finally:
+            notifier.close()
+        activation = self.store.load()
+        if activation and activation.phase in ACTIVE_PHASES:
+            self.add_event("Resuming saved activation")
+            self._start_worker(acquire_if_idle=False)
+
+    def _start_worker(self, acquire_if_idle: bool) -> None:
+        with self.lock:
+            if self.worker and self.worker.is_alive():
+                raise RuntimeError("Activation work is already running")
+            self.bot = Bot(self.config)
+            self.worker = threading.Thread(
+                target=self._run_worker,
+                args=(self.bot, acquire_if_idle),
+                name="activation-worker",
+                daemon=True,
+            )
+            self.worker.start()
+
+    def _run_worker(self, watcher: Bot, acquire_if_idle: bool) -> None:
+        try:
+            watcher.run(acquire_if_idle=acquire_if_idle, notify_startup=False)
+        except Exception as error:
+            LOG.exception("activation worker failed")
+            with self.lock:
+                self.last_error = str(error)
+            self.add_event("Activation worker failed", "error")
+        finally:
+            watcher.close()
+            activation = self.store.load()
+            if activation:
+                self.add_event(f"Activation state: {activation.phase}")
+            with self.lock:
+                if self.bot is watcher:
+                    self.bot = None
+
+    def start_purchase(self) -> tuple[bool, str]:
+        with self.lock:
+            if self.worker and self.worker.is_alive():
+                return False, "Activation work is already running"
+            activation = self.store.load()
+            if activation and activation.phase in ACTIVE_PHASES:
+                return False, "Cancel or finish the current activation first"
+            self.last_error = None
+            self.add_event("Number purchase requested")
+            self._start_worker(acquire_if_idle=True)
+            return True, "Looking for a number"
+
+    def cancel_active_activation(self) -> tuple[bool, str]:
+        with self.lock:
+            activation = self.store.load()
+            if not activation or activation.phase not in ACTIVE_PHASES:
+                return False, "There is no active activation to cancel"
+            cancelled = Activation(
+                activation.activation_id,
+                activation.phone_number,
+                activation.acquired_at,
+                "cancellation_pending",
+            )
+            self.store.save(cancelled)
+            self.add_event("Cancellation requested", "warning")
+            if self.bot:
+                self.bot.request_cancel()
+            if not self.worker or not self.worker.is_alive():
+                self._start_worker(acquire_if_idle=False)
+            return True, "Cancellation requested"
+
+    def retry_pending_work(self) -> tuple[bool, str]:
+        with self.lock:
+            activation = self.store.load()
+            if not activation or activation.phase not in ACTIVE_PHASES:
+                return False, "There is no pending activation work"
+            if self.worker and self.worker.is_alive():
+                return False, "Activation work is already running"
+            self.last_error = None
+            self.add_event("Retry requested")
+            self._start_worker(acquire_if_idle=False)
+            return True, "Retry started"
+
+    def status(self) -> dict[str, object]:
+        with self.lock:
+            activation = self.store.load()
+            phase = activation.phase if activation else "idle"
+            worker_active = bool(self.worker and self.worker.is_alive())
+            elapsed = max(0, int(time.time() - activation.acquired_at)) if activation else 0
+            remaining = (
+                max(0, self.config.activation_timeout_seconds - elapsed)
+                if activation and phase in ACTIVE_PHASES
+                else 0
+            )
+            active = bool(activation and phase in ACTIVE_PHASES)
+            retryable = active and not worker_active
+            return {
+                "phase": phase,
+                "phoneNumber": activation.phone_number if activation else None,
+                "activationId": activation.activation_id if activation else None,
+                "elapsedSeconds": elapsed,
+                "timeoutRemainingSeconds": remaining,
+                "workerActive": worker_active,
+                "canPurchase": not active and not worker_active,
+                "canCancel": active and phase != "cancellation_pending",
+                "canRetry": retryable,
+                "lastError": self.last_error,
+                "events": list(self.events),
+            }
+
+    def shutdown(self) -> None:
+        with self.lock:
+            if self.bot:
+                self.bot.stop.set()
 
 
 def main() -> int:

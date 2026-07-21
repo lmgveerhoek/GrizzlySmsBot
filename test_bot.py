@@ -376,5 +376,66 @@ class LifecycleTests(unittest.TestCase):
                 watcher.wait_for_code(session, activation)
 
 
+class ActivationControllerTests(unittest.TestCase):
+    def test_starts_idle_without_purchasing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+
+            self.assertEqual(controller.status()["phase"], "idle")
+            self.assertTrue(controller.status()["canPurchase"])
+
+    def test_purchase_requires_idle_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.store.save(
+                bot.Activation("123", "447700900123", time.time(), "waiting_for_sms")
+            )
+
+            accepted, message = controller.start_purchase()
+
+            self.assertFalse(accepted)
+            self.assertIn("current activation", message)
+
+    def test_cancel_persists_before_starting_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.store.save(
+                bot.Activation("123", "447700900123", time.time(), "waiting_for_sms")
+            )
+            controller._start_worker = Mock()
+
+            accepted, _ = controller.cancel_active_activation()
+
+            self.assertTrue(accepted)
+            self.assertEqual(controller.store.load().phase, "cancellation_pending")
+            controller._start_worker.assert_called_once_with(acquire_if_idle=False)
+
+    def test_status_never_exposes_pending_sms_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.store.save(
+                bot.Activation(
+                    "123",
+                    "447700900123",
+                    time.time(),
+                    "code_notification_pending",
+                    "123456",
+                )
+            )
+
+            status = controller.status()
+
+            self.assertNotIn("smsCode", status)
+            self.assertNotIn("123456", repr(status))
+
+
 if __name__ == "__main__":
     unittest.main()
