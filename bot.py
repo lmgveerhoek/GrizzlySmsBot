@@ -537,6 +537,16 @@ class Bot:
                 if self.change_status(session, activation, 8):
                     self.finish(activation, "cancelled")
                     return
+                status = self.get_status(session, activation)
+                if status in {"STATUS_CANCEL", "NO_ACTIVATION"}:
+                    LOG.info(
+                        "cancellation already complete activation=%s",
+                        activation.activation_id,
+                    )
+                    self.finish(activation, "cancelled")
+                    return
+                if status in {"BAD_KEY", "BAD_ACTION", "SERVICE_UNAVAILABLE_REGION"}:
+                    raise ValueError(f"Grizzly terminal status error: {status}")
                 self.stop.wait(self.config.sms_poll_seconds)
                 continue
 

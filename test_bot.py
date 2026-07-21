@@ -360,6 +360,39 @@ class LifecycleTests(unittest.TestCase):
 
             self.assertEqual(watcher.store.load().phase, "cancelled")
 
+    def test_reconciles_activation_already_cancelled_at_grizzly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            session = Mock()
+            session.get.side_effect = [
+                response("BAD_ACTION"),
+                response("STATUS_CANCEL"),
+            ]
+            activation = bot.Activation(
+                "123", "447700900123", time.time(), "cancellation_pending"
+            )
+
+            watcher.wait_for_code(session, activation)
+
+            self.assertEqual(watcher.store.load().phase, "cancelled")
+            self.assertTrue(watcher.stop.requested)
+
+    def test_reconciles_activation_missing_at_grizzly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            session = Mock()
+            session.get.side_effect = [
+                response("BAD_ACTION"),
+                response("NO_ACTIVATION"),
+            ]
+            activation = bot.Activation(
+                "123", "447700900123", time.time(), "cancellation_pending"
+            )
+
+            watcher.wait_for_code(session, activation)
+
+            self.assertEqual(watcher.store.load().phase, "cancelled")
+
     def test_reports_resend_requirement_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             watcher = bot.Bot(config(str(Path(directory) / "state.db")))
