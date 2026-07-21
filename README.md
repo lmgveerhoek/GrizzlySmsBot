@@ -46,9 +46,11 @@ number**. Open [http://localhost:8080](http://localhost:8080), sign in with
 number. Cancellation is persisted and retried until Grizzly confirms it.
 
 The dashboard binds to host loopback only in Docker. Do not change the Compose
-port mapping to a public interface. Verification codes are not shown in the UI;
-they continue to use Discord and optional ntfy. Never delete the SQLite volume to
-skip an activation because that can leave the paid activation active at Grizzly.
+port mapping to a public interface. It provides copy buttons for international
+and country-code-free number formats, displays the latest received verification
+code, and supports persistent light and dark themes. Codes also continue to use
+Discord and optional ntfy. Never delete the SQLite volume to skip an activation
+because that can leave the paid activation active at Grizzly.
 
 ## Quick Start
 
