@@ -13,7 +13,9 @@ RUN groupadd --gid 10001 bot \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --requirement requirements.txt
 
-COPY --chown=bot:bot bot.py ./
+COPY --chown=bot:bot bot.py web.py ./
+COPY --chown=bot:bot templates ./templates
+COPY --chown=bot:bot static ./static
 
 USER bot
 

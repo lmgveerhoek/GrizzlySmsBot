@@ -37,6 +37,19 @@ response is interrupted, a retry or restart can create a duplicate message. The
 bot persists pending number and code notifications and resumes them on the next
 run instead of buying another number.
 
+## Local Web Dashboard
+
+The recommended mode is the authenticated local dashboard. With `WEB_UI=true`,
+the bot starts idle and does not purchase a number until you click **Get another
+number**. Open [http://localhost:8080](http://localhost:8080), sign in with
+`UI_PASSWORD`, and use **Cancel this number** when a service rejects an acquired
+number. Cancellation is persisted and retried until Grizzly confirms it.
+
+The dashboard binds to host loopback only in Docker. Do not change the Compose
+port mapping to a public interface. Verification codes are not shown in the UI;
+they continue to use Discord and optional ntfy. Never delete the SQLite volume to
+skip an activation because that can leave the paid activation active at Grizzly.
+
 ## Quick Start
 
 ```bash
@@ -57,6 +70,10 @@ DISCORD_MAX_RETRIES=5
 NTFY_URL=https://ntfy.sh/your-private-topic
 NTFY_MAX_RETRIES=5
 
+WEB_UI=true
+UI_PASSWORD=replace_with_a_long_local_password
+WEB_UI_PORT=8080
+
 MAX_REQUESTS_PER_SECOND=2
 REQUEST_TIMEOUT_SECONDS=10
 STATUS_EVERY_REQUESTS=100
@@ -65,15 +82,15 @@ ACTIVATION_TIMEOUT_SECONDS=900
 LOG_LEVEL=INFO
 ```
 
-Start one activation run:
+Start the dashboard:
 
 ```bash
 docker compose up --build
 ```
 
-The container deliberately has no restart policy. It exits after a code is
-delivered, when the activation expires or fails, or when you stop it. Run the
-same command again to intentionally acquire a new number.
+Open [http://localhost:8080](http://localhost:8080). The container deliberately
+has no restart policy. An unfinished activation is resumed after a manual restart,
+while a fresh purchase always requires an explicit dashboard confirmation.
 
 Watch a running container from another terminal:
 
@@ -122,6 +139,12 @@ be overridden in `.env`.
 | `STATE_DB_PATH` | no | SQLite state path. Docker defaults to `/data/grizzlysms.db`. |
 | `LOG_LEVEL` | no | Python logging level, such as `INFO` or `DEBUG`. |
 | `GRIZZLY_API_URL` | no | Override the Grizzly endpoint for testing. |
+| `WEB_UI` | no | Enable the local dashboard and explicit-purchase mode. Defaults to `false`. |
+| `UI_PASSWORD` | with Web UI | Password required to access the dashboard. |
+| `WEB_UI_PORT` | no | Host loopback port for the dashboard. Defaults to `8080`. |
+
+Set `WEB_UI=false` to retain headless behavior: the process immediately looks for
+one number, follows its lifecycle, and exits after completion or failure.
 
 ## Running Without Docker
 
