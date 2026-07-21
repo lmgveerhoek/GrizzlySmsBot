@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest.mock import Mock, patch
 
 import bot
@@ -14,6 +15,26 @@ def response(text: str, ok: bool = True, status_code: int = 200) -> Mock:
     result.status_code = status_code
     result.headers = {}
     return result
+
+
+def config(state_db_path: str, ntfy_url: Optional[str] = None) -> bot.Config:
+    return bot.Config(
+        api_key="key",
+        service="wx",
+        country="62",
+        max_price="2",
+        provider_ids=None,
+        rate=1,
+        timeout=1,
+        status_every=100,
+        discord_webhook_url="https://example.test/webhook",
+        discord_max_retries=1,
+        ntfy_url=ntfy_url,
+        ntfy_max_retries=1,
+        sms_poll_seconds=1,
+        activation_timeout_seconds=900,
+        state_db_path=state_db_path,
+    )
 
 
 class ParsingTests(unittest.TestCase):
@@ -55,7 +76,9 @@ class ConfigTests(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertEqual(bot.Config.from_env().sms_poll_seconds, 5)
+            parsed = bot.Config.from_env()
+            self.assertEqual(parsed.sms_poll_seconds, 5)
+            self.assertIsNone(parsed.ntfy_url)
 
 
 class DiscordNotifierTests(unittest.TestCase):
@@ -75,27 +98,66 @@ class DiscordNotifierTests(unittest.TestCase):
         )
 
 
+class NtfyNotifierTests(unittest.TestCase):
+    def test_sends_original_ntfy_payload(self) -> None:
+        notifier = bot.NtfyNotifier("https://ntfy.sh/topic", 1, 1)
+        notifier.session.post = Mock(return_value=response(""))
+
+        self.assertTrue(notifier.send("Title", "message", urgent=True))
+
+        notifier.session.post.assert_called_once_with(
+            "https://ntfy.sh/topic",
+            data=b"message",
+            headers={
+                "Title": "Title",
+                "Priority": "urgent",
+                "Tags": "telephone_receiver",
+            },
+            timeout=1,
+        )
+
+
+class NotificationFanoutTests(unittest.TestCase):
+    def test_configures_discord_without_ntfy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            self.assertEqual(len(watcher.notifiers), 1)
+            watcher.close()
+
+    def test_sends_to_both_providers_and_accepts_partial_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(
+                config(str(Path(directory) / "state.db"), "https://ntfy.sh/topic")
+            )
+            discord = Mock()
+            ntfy = Mock()
+            discord.send.return_value = True
+            ntfy.send.return_value = False
+            watcher.notifiers = [discord, ntfy]
+
+            self.assertTrue(watcher.send_notification("Title", "message", urgent=True))
+
+            discord.send.assert_called_once_with("Title", "message", True)
+            ntfy.send.assert_called_once_with("Title", "message", True)
+
+    def test_fails_when_both_providers_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(
+                config(str(Path(directory) / "state.db"), "https://ntfy.sh/topic")
+            )
+            discord = Mock(send=Mock(return_value=False))
+            ntfy = Mock(send=Mock(return_value=False))
+            watcher.notifiers = [discord, ntfy]
+
+            self.assertFalse(watcher.send_notification("Title", "message"))
+
+
 class LifecycleTests(unittest.TestCase):
     def test_delivers_code_then_completes_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            config = bot.Config(
-                api_key="key",
-                service="wx",
-                country="62",
-                max_price="2",
-                provider_ids=None,
-                rate=1,
-                timeout=1,
-                status_every=100,
-                discord_webhook_url="https://example.test/webhook",
-                discord_max_retries=1,
-                sms_poll_seconds=1,
-                activation_timeout_seconds=900,
-                state_db_path=str(Path(directory) / "state.db"),
-            )
-            watcher = bot.Bot(config)
-            watcher.notifier = Mock()
-            watcher.notifier.send.return_value = True
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.return_value = True
             session = Mock()
             session.get.side_effect = [
                 response("ACCESS_READY"),
@@ -110,7 +172,7 @@ class LifecycleTests(unittest.TestCase):
 
             self.assertTrue(watcher.stop.requested)
             self.assertEqual(watcher.store.load().phase, "completed")
-            watcher.notifier.send.assert_called_once_with(
+            watcher.notifiers[0].send.assert_called_once_with(
                 "GRIZZLY SMS CODE RECEIVED",
                 "Code: 123456\nActivation: 123",
                 True,

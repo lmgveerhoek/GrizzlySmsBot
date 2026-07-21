@@ -56,6 +56,8 @@ class Config:
     status_every: int
     discord_webhook_url: str
     discord_max_retries: int
+    ntfy_url: str | None
+    ntfy_max_retries: int
     sms_poll_seconds: float
     activation_timeout_seconds: int
     state_db_path: str
@@ -74,6 +76,8 @@ class Config:
             status_every=env_int_optional("STATUS_EVERY_REQUESTS", 100),
             discord_webhook_url=env_required("DISCORD_WEBHOOK_URL"),
             discord_max_retries=env_int_optional("DISCORD_MAX_RETRIES", 5),
+            ntfy_url=os.getenv("NTFY_URL", "").strip() or None,
+            ntfy_max_retries=env_int_optional("NTFY_MAX_RETRIES", 5),
             sms_poll_seconds=env_float_optional("SMS_POLL_SECONDS", 5, 1),
             activation_timeout_seconds=env_int_optional(
                 "ACTIVATION_TIMEOUT_SECONDS", 900
@@ -256,6 +260,47 @@ class DiscordNotifier:
         self.session.close()
 
 
+class NtfyNotifier:
+    def __init__(self, url: str, timeout: float, max_retries: int) -> None:
+        self.url = url
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.session = new_session()
+
+    def send(self, title: str, message: str, urgent: bool = False) -> bool:
+        headers = {
+            "Title": title,
+            "Priority": "urgent" if urgent else "default",
+            "Tags": "telephone_receiver" if urgent else "white_check_mark",
+        }
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.post(
+                    self.url,
+                    data=message.encode(),
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as error:
+                LOG.warning("ntfy network error: %s", type(error).__name__)
+            else:
+                if response.ok:
+                    return True
+                if response.status_code != 429 and not 500 <= response.status_code < 600:
+                    LOG.warning("ntfy HTTP %s", response.status_code)
+                    return False
+                delay = DiscordNotifier.retry_delay(response, attempt)
+                LOG.warning("ntfy HTTP %s; retrying in %.1fs", response.status_code, delay)
+                time.sleep(delay)
+                continue
+            time.sleep(2**attempt)
+        LOG.warning("ntfy notification failed after %s attempts", self.max_retries)
+        return False
+
+    def close(self) -> None:
+        self.session.close()
+
+
 def new_session() -> requests.Session:
     session = requests.Session()
     session.mount("https://", HTTPAdapter(max_retries=0, pool_maxsize=1))
@@ -268,17 +313,24 @@ class Bot:
         self.config = config
         self.stop = StopSignal()
         self.limiter = RateLimiter(config.rate)
-        self.notifier = DiscordNotifier(
-            config.discord_webhook_url,
-            config.timeout,
-            config.discord_max_retries,
-        )
+        self.notifiers = [
+            DiscordNotifier(
+                config.discord_webhook_url,
+                config.timeout,
+                config.discord_max_retries,
+            )
+        ]
+        if config.ntfy_url:
+            self.notifiers.append(
+                NtfyNotifier(config.ntfy_url, config.timeout, config.ntfy_max_retries)
+            )
         self.store = StateStore(config.state_db_path)
         self.total_requests = 0
         self.no_numbers = 0
 
     def send_notification(self, title: str, message: str, urgent: bool = False) -> bool:
-        return self.notifier.send(title, message, urgent)
+        results = [notifier.send(title, message, urgent) for notifier in self.notifiers]
+        return any(results)
 
     def record_request(self, no_number: bool = False) -> None:
         self.total_requests += 1
@@ -506,7 +558,8 @@ class Bot:
 
     def close(self) -> None:
         self.stop.set()
-        self.notifier.close()
+        for notifier in self.notifiers:
+            notifier.close()
 
 
 def main() -> int:

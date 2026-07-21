@@ -1,8 +1,8 @@
 # Grizzly SMS Bot
 
 A one-shot Grizzly SMS activation bot. It acquires one phone number, sends it to
-a Discord webhook, waits for the verification SMS, sends the code once, completes
-the activation, and exits. It never automatically starts another purchase.
+Discord and optionally ntfy, waits for the verification SMS, sends the code once,
+completes the activation, and exits. It never automatically starts another purchase.
 
 The activation ID is persisted in SQLite. If the process stops while waiting for
 the SMS, the next manual start resumes the same activation instead of buying a
@@ -14,8 +14,9 @@ second number.
 - A [Grizzly SMS](https://grizzlysms.com/) API key and account balance
 - A private Discord channel with an incoming webhook
 
-Treat the Grizzly API key and Discord webhook URL as secrets. Anyone with access
-to the Discord channel can read the purchased number and verification code.
+Treat the Grizzly API key, Discord webhook URL, and ntfy topic URL as secrets.
+Anyone subscribed to either notification destination can read the purchased number
+and verification code.
 
 ## Discord Webhook
 
@@ -23,6 +24,13 @@ In Discord, create a private channel, then open **Edit Channel > Integrations >
 Webhooks** and create a webhook. Copy its URL into `DISCORD_WEBHOOK_URL`. The bot
 disables all Discord mentions in its payloads, so SMS content cannot trigger
 `@everyone`, roles, or users.
+
+## Optional ntfy Redundancy
+
+Set `NTFY_URL` to an ntfy topic URL to send every startup, number, timeout, and
+code notification to both Discord and ntfy. The bot attempts both providers even
+when the first succeeds, and treats notification delivery as successful when at
+least one provider accepts it.
 
 ## Quick Start
 
@@ -41,6 +49,8 @@ PROVIDER_IDS=311
 
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 DISCORD_MAX_RETRIES=5
+NTFY_URL=https://ntfy.sh/your-private-topic
+NTFY_MAX_RETRIES=5
 
 MAX_REQUESTS_PER_SECOND=2
 REQUEST_TIMEOUT_SECONDS=10
@@ -75,10 +85,10 @@ docker compose down
 ## Lifecycle
 
 1. Poll Grizzly until one number is available.
-2. Persist the activation ID and number before notifying Discord.
-3. Send the number and activation ID to Discord.
+2. Persist the activation ID and number before notifying the configured providers.
+3. Send the number and activation ID to Discord and, when configured, ntfy.
 4. Mark the activation ready and poll Grizzly for the SMS code.
-5. Send the code to Discord without logging it locally.
+5. Send the code to the configured providers without logging it locally.
 6. Complete the activation and exit.
 
 The bot cancels an activation after `ACTIVATION_TIMEOUT_SECONDS`. A state database
@@ -97,6 +107,8 @@ be overridden in `.env`.
 | `PROVIDER_IDS` | no | Comma-separated provider IDs; omit when empty. |
 | `DISCORD_WEBHOOK_URL` | yes | Private Discord incoming-webhook URL. |
 | `DISCORD_MAX_RETRIES` | no | Notification attempts for network, 429, and 5xx errors. Defaults to `5`. |
+| `NTFY_URL` | no | ntfy topic URL for redundant delivery alongside Discord. |
+| `NTFY_MAX_RETRIES` | no | ntfy notification attempts for network, 429, and 5xx errors. Defaults to `5`. |
 | `MAX_REQUESTS_PER_SECOND` | yes | Maximum number-acquisition request rate. |
 | `REQUEST_TIMEOUT_SECONDS` | yes | HTTP request timeout. |
 | `STATUS_EVERY_REQUESTS` | no | Progress log frequency. Defaults to `100`. |
