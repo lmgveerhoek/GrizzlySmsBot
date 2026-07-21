@@ -52,6 +52,20 @@ code, and supports persistent light and dark themes. Codes also continue to use
 Discord and optional ntfy. Never delete the SQLite volume to skip an activation
 because that can leave the paid activation active at Grizzly.
 
+### Activation History
+
+New purchases are recorded permanently in the dashboard with their phone number,
+purchase time, Grizzly activation ID, purchase price and currency, allowed provider
+filter, final outcome, and whether a code arrived. Summary cards show total attempts,
+codes received, unsuccessful activations, and gross purchase value per currency.
+
+Number acquisition uses Grizzly's `getNumberV2` response for price metadata while
+SMS polling and status changes continue to use the v1 lifecycle. Grizzly does not
+return the selected provider ID in its documented purchase response, so the history
+shows the configured **Allowed providers** rather than claiming which provider was
+used. Tracking starts with purchases made after this update; older activations cannot
+be reconstructed with reliable price/provider metadata.
+
 ## Quick Start
 
 ```bash
