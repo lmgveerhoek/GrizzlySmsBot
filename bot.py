@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import signal
-import threading
+import sqlite3
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -19,13 +20,6 @@ def env_required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise ValueError(f"{name} is required")
-    return value
-
-
-def env_int(name: str, minimum: int = 1) -> int:
-    value = int(env_required(name))
-    if value < minimum:
-        raise ValueError(f"{name} must be >= {minimum}")
     return value
 
 
@@ -50,11 +44,13 @@ class Config:
     country: str
     max_price: str
     provider_ids: str | None
-    workers: int
     rate: float
     timeout: float
     status_every: int
     ntfy_url: str
+    sms_poll_seconds: float
+    activation_timeout_seconds: int
+    state_db_path: str
     api_url: str = API_URL
 
     @classmethod
@@ -65,11 +61,15 @@ class Config:
             country=env_required("COUNTRY"),
             max_price=env_required("MAX_PRICE"),
             provider_ids=os.getenv("PROVIDER_IDS", "").strip() or None,
-            workers=env_int("THREADS"),
             rate=env_float("MAX_REQUESTS_PER_SECOND"),
             timeout=env_float("REQUEST_TIMEOUT_SECONDS", 1),
             status_every=env_int_optional("STATUS_EVERY_REQUESTS", 100),
             ntfy_url=env_required("NTFY_URL"),
+            sms_poll_seconds=env_float("SMS_POLL_SECONDS", 1),
+            activation_timeout_seconds=env_int_optional(
+                "ACTIVATION_TIMEOUT_SECONDS", 900
+            ),
+            state_db_path=os.getenv("STATE_DB_PATH", "/data/grizzlysms.db"),
             api_url=os.getenv("GRIZZLY_API_URL", API_URL),
         )
 
@@ -91,21 +91,18 @@ class RateLimiter:
     def __init__(self, rate: float) -> None:
         self.interval = 1 / rate
         self.next_request = time.monotonic()
-        self.lock = threading.Lock()
 
-    def wait(self, stop: threading.Event) -> bool:
-        while not stop.is_set():
-            with self.lock:
-                delay = self.next_request - time.monotonic()
-                if delay <= 0:
-                    self.next_request = time.monotonic() + self.interval
-                    return True
+    def wait(self, stop: "StopSignal") -> bool:
+        while not stop.requested:
+            delay = self.next_request - time.monotonic()
+            if delay <= 0:
+                self.next_request = time.monotonic() + self.interval
+                return True
             stop.wait(min(delay, 0.25))
         return False
 
     def pause(self, seconds: float) -> None:
-        with self.lock:
-            self.next_request = max(self.next_request, time.monotonic() + seconds)
+        self.next_request = max(self.next_request, time.monotonic() + seconds)
 
 
 def parse_number(body: str) -> tuple[str, str] | None:
@@ -113,6 +110,89 @@ def parse_number(body: str) -> tuple[str, str] | None:
     if len(parts) == 3 and parts[0] == "ACCESS_NUMBER" and all(parts[1:]):
         return parts[1], parts[2]
     return None
+
+
+def parse_code(body: str) -> str | None:
+    prefix = "STATUS_OK:"
+    if body.startswith(prefix) and body[len(prefix) :]:
+        return body[len(prefix) :]
+    return None
+
+
+@dataclass(frozen=True)
+class Activation:
+    activation_id: str
+    phone_number: str
+    acquired_at: float
+    phase: str
+
+
+class StateStore:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activation (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    activation_id TEXT NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    acquired_at REAL NOT NULL,
+                    phase TEXT NOT NULL
+                )
+                """
+            )
+
+    def connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path)
+
+    def load(self) -> Activation | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT activation_id, phone_number, acquired_at, phase "
+                "FROM activation WHERE singleton = 1"
+            ).fetchone()
+        return Activation(*row) if row else None
+
+    def save(self, activation: Activation) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO activation
+                    (singleton, activation_id, phone_number, acquired_at, phase)
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    activation_id = excluded.activation_id,
+                    phone_number = excluded.phone_number,
+                    acquired_at = excluded.acquired_at,
+                    phase = excluded.phase
+                """,
+                (
+                    activation.activation_id,
+                    activation.phone_number,
+                    activation.acquired_at,
+                    activation.phase,
+                ),
+            )
+
+    def clear(self) -> None:
+        with self.connection() as connection:
+            connection.execute("DELETE FROM activation WHERE singleton = 1")
+
+
+class StopSignal:
+    def __init__(self) -> None:
+        self.requested = False
+
+    def set(self) -> None:
+        self.requested = True
+
+    def wait(self, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while not self.requested and time.monotonic() < deadline:
+            time.sleep(min(0.25, deadline - time.monotonic()))
+        return self.requested
 
 
 def new_session() -> requests.Session:
@@ -125,73 +205,51 @@ def new_session() -> requests.Session:
 class Bot:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.stop = threading.Event()
+        self.stop = StopSignal()
         self.limiter = RateLimiter(config.rate)
         self.ntfy = new_session()
-        self.ntfy_lock = threading.Lock()
-        self.seen_lock = threading.Lock()
-        self.seen_activations: set[str] = set()
-        self.status_lock = threading.Lock()
+        self.store = StateStore(config.state_db_path)
         self.total_requests = 0
         self.no_numbers = 0
 
     def send_notification(self, title: str, message: str, urgent: bool = False) -> bool:
         try:
-            with self.ntfy_lock:
-                response = self.ntfy.post(
-                    self.config.ntfy_url,
-                    data=message.encode(),
-                    headers={
-                        "Title": title,
-                        "Priority": "urgent" if urgent else "default",
-                        "Tags": "telephone_receiver" if urgent else "white_check_mark",
-                    },
-                    timeout=self.config.timeout,
-                )
+            response = self.ntfy.post(
+                self.config.ntfy_url,
+                data=message.encode(),
+                headers={
+                    "Title": title,
+                    "Priority": "urgent" if urgent else "default",
+                    "Tags": "telephone_receiver" if urgent else "white_check_mark",
+                },
+                timeout=self.config.timeout,
+            )
             return response.ok
         except requests.RequestException as error:
             LOG.warning("ntfy error: %s", type(error).__name__)
             return False
 
-    def mark_seen(self, activation_id: str) -> bool:
-        with self.seen_lock:
-            if activation_id in self.seen_activations:
-                return False
-            self.seen_activations.add(activation_id)
-            return True
-
     def record_request(self, no_number: bool = False) -> None:
-        with self.status_lock:
-            self.total_requests += 1
-            if no_number:
-                self.no_numbers += 1
-            if self.total_requests % self.config.status_every != 0:
-                return
-            with self.seen_lock:
-                acquired = len(self.seen_activations)
+        self.total_requests += 1
+        if no_number:
+            self.no_numbers += 1
+        if self.total_requests % self.config.status_every == 0:
             LOG.info(
-                "still polling requests=%s no_numbers=%s acquired=%s",
+                "still polling requests=%s no_numbers=%s",
                 self.total_requests,
                 self.no_numbers,
-                acquired,
             )
 
-    def notify_purchase(self, activation_id: str, phone_number: str) -> None:
+    def notify_purchase(self, activation_id: str, phone_number: str) -> bool:
         message = f"Number: {phone_number}\nActivation: {activation_id}"
         if self.send_notification("GRIZZLY NUMBER ACQUIRED", message, urgent=True):
             LOG.info("notification sent activation=%s", activation_id)
+            return True
         else:
             LOG.warning("notification failed activation=%s", activation_id)
+            return False
 
-    def poll_worker(self, worker_id: int) -> None:
-        session = new_session()
-        try:
-            while self.limiter.wait(self.stop):
-                self.poll_once(session, worker_id)
-        finally:
-            session.close()
-
-    def poll_once(self, session: requests.Session, worker_id: int) -> None:
+    def acquire(self, session: requests.Session) -> Activation | None:
         try:
             response = session.get(
                 self.config.api_url,
@@ -201,66 +259,176 @@ class Bot:
         except requests.RequestException as error:
             LOG.warning("Grizzly network error: %s", type(error).__name__)
             self.stop.wait(1)
-            return
+            return None
 
         if response.status_code != 200:
             self.record_request()
             delay = 2.0
             self.limiter.pause(delay)
             LOG.warning("Grizzly HTTP %s: pause %.1fs", response.status_code, delay)
-            return
+            return None
 
         body = response.text.strip()
         if body == "NO_NUMBERS":
             self.record_request(no_number=True)
-            return
+            return None
 
         self.record_request()
 
         number = parse_number(body)
         if not number:
+            if body in {"BAD_KEY", "NO_BALANCE", "SERVICE_UNAVAILABLE_REGION"} or (
+                "prohibited for sale" in body.lower()
+            ):
+                raise ValueError(f"Grizzly terminal error: {body}")
             self.limiter.pause(2)
             LOG.warning("Grizzly response: %s", body[:100])
-            return
+            return None
 
         activation_id, phone_number = number
-        if not self.mark_seen(activation_id):
-            return
-
         LOG.info(
-            "number acquired worker=%s activation=%s number=%s",
-            worker_id,
+            "number acquired activation=%s number=%s",
             activation_id,
             phone_number,
         )
-        self.notify_purchase(activation_id, phone_number)
+        return Activation(activation_id, phone_number, time.time(), "acquired")
+
+    def change_status(self, session: requests.Session, activation: Activation, status: int) -> bool:
+        try:
+            response = session.get(
+                self.config.api_url,
+                params={
+                    "api_key": self.config.api_key,
+                    "action": "setStatus",
+                    "id": activation.activation_id,
+                    "status": str(status),
+                },
+                timeout=self.config.timeout,
+            )
+        except requests.RequestException as error:
+            LOG.warning("Grizzly status update error: %s", type(error).__name__)
+            return False
+        if response.ok and response.text.strip().startswith("ACCESS_"):
+            return True
+        LOG.warning("Grizzly status update failed: %s", response.text.strip()[:100])
+        return False
+
+    def get_status(self, session: requests.Session, activation: Activation) -> str | None:
+        try:
+            response = session.get(
+                self.config.api_url,
+                params={
+                    "api_key": self.config.api_key,
+                    "action": "getStatus",
+                    "id": activation.activation_id,
+                },
+                timeout=self.config.timeout,
+            )
+        except requests.RequestException as error:
+            LOG.warning("Grizzly SMS status error: %s", type(error).__name__)
+            return None
+        if not response.ok:
+            LOG.warning("Grizzly SMS status HTTP %s", response.status_code)
+            return None
+        return response.text.strip()
+
+    def finish(self, activation: Activation, phase: str) -> None:
+        self.store.save(
+            Activation(
+                activation.activation_id,
+                activation.phone_number,
+                activation.acquired_at,
+                phase,
+            )
+        )
+        self.stop.set()
+
+    def wait_for_code(self, session: requests.Session, activation: Activation) -> None:
+        if not self.change_status(session, activation, 1):
+            self.change_status(session, activation, 8)
+            self.finish(activation, "failed")
+            return
+        self.store.save(
+            Activation(
+                activation.activation_id,
+                activation.phone_number,
+                activation.acquired_at,
+                "waiting_for_sms",
+            )
+        )
+        while not self.stop.requested:
+            if time.time() - activation.acquired_at >= self.config.activation_timeout_seconds:
+                self.change_status(session, activation, 8)
+                self.send_notification(
+                    "Grizzly SMS timed out",
+                    f"Activation: {activation.activation_id}",
+                    urgent=True,
+                )
+                self.finish(activation, "timed_out")
+                return
+
+            status = self.get_status(session, activation)
+            if status is None or status == "STATUS_WAIT_CODE":
+                self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
+            code = parse_code(status)
+            if code:
+                if self.send_notification(
+                    "GRIZZLY SMS CODE RECEIVED",
+                    f"Code: {code}\nActivation: {activation.activation_id}",
+                    urgent=True,
+                ):
+                    self.change_status(session, activation, 6)
+                    self.finish(activation, "code_delivered")
+                else:
+                    self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
+            if status in {"STATUS_CANCEL", "NO_ACTIVATION", "BAD_STATUS"}:
+                LOG.warning("activation ended status=%s", status)
+                self.finish(activation, "failed")
+                return
+
+            LOG.warning("unexpected SMS status: %s", status[:100])
+            self.stop.wait(self.config.sms_poll_seconds)
 
     def run(self) -> None:
         cfg = self.config
         LOG.info(
             "startup service=%s country=%s maxPrice=%s providerIds=%s "
-            "workers=%s limit=%.1f/s",
+            "limit=%.1f/s",
             cfg.service,
             cfg.country,
             cfg.max_price,
             cfg.provider_ids or "none",
-            cfg.workers,
             cfg.rate,
         )
         result = self.send_notification(
             "Grizzly SMS startup test",
-            f"Bot active: {cfg.workers} workers, limit {cfg.rate:g} req/s.",
+            f"Bot active: one-shot mode, limit {cfg.rate:g} req/s.",
         )
         LOG.info("ntfy test: %s", "OK" if result else "FAILED")
 
-        threads = [
-            threading.Thread(target=self.poll_worker, args=(worker,), name=f"poll-{worker}")
-            for worker in range(1, cfg.workers + 1)
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        activation = self.store.load()
+        if activation and activation.phase in {"acquired", "waiting_for_sms"}:
+            LOG.info("resuming activation=%s", activation.activation_id)
+        elif activation:
+            LOG.info("clearing terminal activation=%s", activation.activation_id)
+            self.store.clear()
+            activation = None
+
+        with new_session() as session:
+            while activation is None and self.limiter.wait(self.stop):
+                activation = self.acquire(session)
+            if activation is None or self.stop.requested:
+                return
+
+            self.store.save(activation)
+            if not self.notify_purchase(activation.activation_id, activation.phone_number):
+                self.finish(activation, "failed")
+                return
+            self.wait_for_code(session, activation)
 
     def close(self) -> None:
         self.stop.set()
@@ -286,6 +454,9 @@ def main() -> int:
     signal.signal(signal.SIGINT, shutdown)
     try:
         bot.run()
+    except ValueError as error:
+        LOG.error("runtime failed: %s", error)
+        return 2
     finally:
         bot.close()
     return 0
