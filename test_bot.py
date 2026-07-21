@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -59,6 +60,28 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(store.load(), activation)
             store.clear()
             self.assertIsNone(store.load())
+
+    def test_migrates_existing_state_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.db")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE activation (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        activation_id TEXT NOT NULL,
+                        phone_number TEXT NOT NULL,
+                        acquired_at REAL NOT NULL,
+                        phase TEXT NOT NULL
+                    )
+                    """
+                )
+            store = bot.StateStore(path)
+            activation = bot.Activation(
+                "123", "447700900123", 1.0, "code_notification_pending", "123456"
+            )
+            store.save(activation)
+            self.assertEqual(store.load(), activation)
 
 
 class ConfigTests(unittest.TestCase):
@@ -171,6 +194,86 @@ class LifecycleTests(unittest.TestCase):
             watcher.wait_for_code(session, activation)
 
             self.assertTrue(watcher.stop.requested)
+            self.assertEqual(watcher.store.load().phase, "completed")
+            watcher.notifiers[0].send.assert_called_once_with(
+                "GRIZZLY SMS CODE RECEIVED",
+                "Code: 123456\nActivation: 123",
+                True,
+            )
+
+    def test_keeps_acquired_activation_when_number_notification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            activation = bot.Activation("123", "447700900123", time.time(), "acquired")
+            watcher.store.save(activation)
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.return_value = False
+            session = Mock()
+            session.__enter__ = Mock(return_value=session)
+            session.__exit__ = Mock(return_value=False)
+
+            with patch("bot.new_session", return_value=session):
+                watcher.run()
+
+            self.assertEqual(watcher.store.load(), activation)
+            session.get.assert_not_called()
+
+    def test_resumes_acquired_activation_without_another_purchase(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            activation = bot.Activation("123", "447700900123", time.time(), "acquired")
+            watcher.store.save(activation)
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.return_value = True
+            watcher.wait_for_code = Mock()
+            session = Mock()
+            session.__enter__ = Mock(return_value=session)
+            session.__exit__ = Mock(return_value=False)
+
+            with patch("bot.new_session", return_value=session):
+                watcher.run()
+
+            watcher.wait_for_code.assert_called_once_with(session, activation)
+            session.get.assert_not_called()
+
+    def test_retries_pending_code_notification_until_delivered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.side_effect = [False, True]
+            session = Mock()
+            session.get.side_effect = [
+                response("STATUS_OK:123456"),
+                response("ACCESS_ACTIVATION"),
+            ]
+            watcher.stop.wait = Mock(return_value=False)
+            activation = bot.Activation(
+                "123", "447700900123", time.time(), "waiting_for_sms"
+            )
+
+            watcher.wait_for_code(session, activation)
+
+            self.assertEqual(watcher.store.load().phase, "completed")
+            self.assertEqual(watcher.notifiers[0].send.call_count, 2)
+
+    def test_resumes_persisted_pending_code_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            watcher.notifiers = [Mock()]
+            watcher.notifiers[0].send.return_value = True
+            session = Mock()
+            session.get.return_value = response("ACCESS_ACTIVATION")
+            activation = bot.Activation(
+                "123",
+                "447700900123",
+                time.time(),
+                "code_notification_pending",
+                "123456",
+            )
+            watcher.store.save(activation)
+
+            watcher.wait_for_code(session, watcher.store.load())
+
             self.assertEqual(watcher.store.load().phase, "completed")
             watcher.notifiers[0].send.assert_called_once_with(
                 "GRIZZLY SMS CODE RECEIVED",

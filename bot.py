@@ -138,6 +138,7 @@ class Activation:
     phone_number: str
     acquired_at: float
     phase: str
+    sms_code: str | None = None
 
 
 class StateStore:
@@ -152,10 +153,16 @@ class StateStore:
                     activation_id TEXT NOT NULL,
                     phone_number TEXT NOT NULL,
                     acquired_at REAL NOT NULL,
-                    phase TEXT NOT NULL
+                    phase TEXT NOT NULL,
+                    sms_code TEXT
                 )
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(activation)")
+            }
+            if "sms_code" not in columns:
+                connection.execute("ALTER TABLE activation ADD COLUMN sms_code TEXT")
 
     def connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
@@ -163,7 +170,7 @@ class StateStore:
     def load(self) -> Activation | None:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT activation_id, phone_number, acquired_at, phase "
+                "SELECT activation_id, phone_number, acquired_at, phase, sms_code "
                 "FROM activation WHERE singleton = 1"
             ).fetchone()
         return Activation(*row) if row else None
@@ -173,19 +180,21 @@ class StateStore:
             connection.execute(
                 """
                 INSERT INTO activation
-                    (singleton, activation_id, phone_number, acquired_at, phase)
-                VALUES (1, ?, ?, ?, ?)
+                    (singleton, activation_id, phone_number, acquired_at, phase, sms_code)
+                VALUES (1, ?, ?, ?, ?, ?)
                 ON CONFLICT(singleton) DO UPDATE SET
                     activation_id = excluded.activation_id,
                     phone_number = excluded.phone_number,
                     acquired_at = excluded.acquired_at,
-                    phase = excluded.phase
+                    phase = excluded.phase,
+                    sms_code = excluded.sms_code
                 """,
                 (
                     activation.activation_id,
                     activation.phone_number,
                     activation.acquired_at,
                     activation.phase,
+                    activation.sms_code,
                 ),
             )
 
@@ -442,18 +451,19 @@ class Bot:
                 activation.phone_number,
                 activation.acquired_at,
                 phase,
+                None,
             )
         )
         self.stop.set()
 
     def wait_for_code(self, session: requests.Session, activation: Activation) -> None:
-        if activation.phase != "code_delivered" and not self.change_status(
+        if activation.phase == "acquired" and not self.change_status(
             session, activation, 1
         ):
             self.change_status(session, activation, 8)
             self.finish(activation, "failed")
             return
-        if activation.phase != "code_delivered":
+        if activation.phase == "acquired":
             activation = Activation(
                 activation.activation_id,
                 activation.phone_number,
@@ -462,6 +472,27 @@ class Bot:
             )
             self.store.save(activation)
         while not self.stop.requested:
+            if activation.phase == "code_notification_pending":
+                if activation.sms_code is None:
+                    LOG.error("pending code is missing activation=%s", activation.activation_id)
+                    self.finish(activation, "failed")
+                    return
+                if self.send_notification(
+                    "GRIZZLY SMS CODE RECEIVED",
+                    f"Code: {activation.sms_code}\nActivation: {activation.activation_id}",
+                    urgent=True,
+                ):
+                    activation = Activation(
+                        activation.activation_id,
+                        activation.phone_number,
+                        activation.acquired_at,
+                        "code_delivered",
+                    )
+                    self.store.save(activation)
+                else:
+                    self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
             if activation.phase == "code_delivered":
                 if self.change_status(session, activation, 6):
                     self.finish(activation, "completed")
@@ -486,25 +517,14 @@ class Bot:
 
             code = parse_code(status)
             if code:
-                if self.send_notification(
-                    "GRIZZLY SMS CODE RECEIVED",
-                    f"Code: {code}\nActivation: {activation.activation_id}",
-                    urgent=True,
-                ):
-                    delivered = Activation(
-                        activation.activation_id,
-                        activation.phone_number,
-                        activation.acquired_at,
-                        "code_delivered",
-                    )
-                    self.store.save(delivered)
-                    if self.change_status(session, delivered, 6):
-                        self.finish(delivered, "completed")
-                    else:
-                        activation = delivered
-                        self.stop.wait(self.config.sms_poll_seconds)
-                else:
-                    self.stop.wait(self.config.sms_poll_seconds)
+                activation = Activation(
+                    activation.activation_id,
+                    activation.phone_number,
+                    activation.acquired_at,
+                    "code_notification_pending",
+                    code,
+                )
+                self.store.save(activation)
                 continue
 
             if status in {"STATUS_CANCEL", "NO_ACTIVATION", "BAD_STATUS"}:
@@ -536,6 +556,7 @@ class Bot:
         if activation and activation.phase in {
             "acquired",
             "waiting_for_sms",
+            "code_notification_pending",
             "code_delivered",
         }:
             LOG.info("resuming activation=%s", activation.activation_id)
@@ -550,9 +571,9 @@ class Bot:
             if activation is None or self.stop.requested:
                 return
 
-            self.store.save(activation)
-            if not self.notify_purchase(activation.activation_id, activation.phone_number):
-                self.finish(activation, "failed")
+            if activation.phase == "acquired" and not self.notify_purchase(
+                activation.activation_id, activation.phone_number
+            ):
                 return
             self.wait_for_code(session, activation)
 

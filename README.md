@@ -32,6 +32,11 @@ code notification to both Discord and ntfy. The bot attempts both providers even
 when the first succeeds, and treats notification delivery as successful when at
 least one provider accepts it.
 
+Notification delivery is at-least-once. If a provider accepts a request but its
+response is interrupted, a retry or restart can create a duplicate message. The
+bot persists pending number and code notifications and resumes them on the next
+run instead of buying another number.
+
 ## Quick Start
 
 ```bash
