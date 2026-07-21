@@ -32,6 +32,13 @@ class WebUiTests(unittest.TestCase):
             "canRetry": False,
             "lastError": None,
             "events": [],
+            "history": [],
+            "historySummary": {
+                "attempts": 0,
+                "codesReceived": 0,
+                "unsuccessful": 0,
+                "grossPurchaseValues": {},
+            },
         }
         self.app = create_app(
             self.config, controller=self.controller, start_controller=False
@@ -68,6 +75,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn(b"Copy with country code", response.data)
         self.assertIn(b"Received SMS", response.data)
         self.assertIn(b"theme-toggle", response.data)
+        self.assertIn(b"Numbers tried", response.data)
+        self.assertIn(b"Allowed providers", response.data)
 
     def test_status_returns_sanitized_controller_data(self) -> None:
         self.login()

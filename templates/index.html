@@ -59,6 +59,39 @@
       <p class="muted sms-note">Grizzly's v1 API provides the extracted verification code rather than the full original message.</p>
     </section>
 
+    <section class="card history-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Activation history</p>
+          <h2>Numbers tried</h2>
+        </div>
+      </div>
+      <div class="history-summary">
+        <div><span>Attempts</span><strong id="summary-attempts">0</strong></div>
+        <div><span>Codes received</span><strong id="summary-successes">0</strong></div>
+        <div><span>Unsuccessful</span><strong id="summary-unsuccessful">0</strong></div>
+        <div><span>Gross purchase value</span><strong id="summary-cost">0</strong></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Acquired</th>
+              <th>Number</th>
+              <th>Price</th>
+              <th>Allowed providers</th>
+              <th>Outcome</th>
+              <th>Code</th>
+            </tr>
+          </thead>
+          <tbody id="history-rows">
+            <tr><td colspan="6" class="empty-cell">No tracked purchases yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted history-note">Provider IDs are the allowed purchase filter. Grizzly does not identify the selected provider in its documented purchase response.</p>
+    </section>
+
     <section class="card activity-card">
       <div class="section-heading">
         <div>

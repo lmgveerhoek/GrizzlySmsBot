@@ -3,10 +3,12 @@ const elements = Object.fromEntries([
   "status-card", "phase", "countdown", "phone-number", "activation-id", "elapsed",
   "last-error", "purchase", "cancel", "retry", "events", "connection", "toast",
   "phone-copy-controls", "copy-full", "copy-national", "sms-card", "sms-message",
-  "copy-sms", "theme-toggle"
+  "copy-sms", "theme-toggle", "summary-attempts", "summary-successes",
+  "summary-unsuccessful", "summary-cost", "history-rows"
 ].map(id => [id, document.getElementById(id)]));
 let copyValues = {full: "", national: "", sms: ""};
 let eventsSignature = "";
+let historySignature = "";
 
 const labels = {
   idle: "Idle", acquired: "Number acquired", ready_pending: "Confirming readiness",
@@ -58,6 +60,31 @@ function render(status) {
       ? status.events.map(event => `<li><time>${new Date(event.time).toLocaleTimeString()}</time><span class="${event.level}">${escapeHtml(event.message)}</span></li>`).join("")
       : '<li class="empty">No activity yet.</li>';
   }
+  renderHistory(status.history || [], status.historySummary || {});
+}
+
+function renderHistory(history, summary) {
+  setText(elements["summary-attempts"], String(summary.attempts || 0));
+  setText(elements["summary-successes"], String(summary.codesReceived || 0));
+  setText(elements["summary-unsuccessful"], String(summary.unsuccessful || 0));
+  const totals = Object.entries(summary.grossPurchaseValues || {});
+  setText(
+    elements["summary-cost"],
+    totals.length ? totals.map(([currency, value]) => `${value} ${currency === "unknown" ? "" : currency}`.trim()).join(" / ") : "0"
+  );
+  const nextSignature = JSON.stringify(history);
+  if (historySignature === nextSignature) return;
+  historySignature = nextSignature;
+  elements["history-rows"].innerHTML = history.length
+    ? history.map(entry => `<tr>
+        <td>${escapeHtml(new Date(entry.acquiredAt).toLocaleString())}</td>
+        <td>${escapeHtml(entry.phoneNumber)}</td>
+        <td>${escapeHtml(entry.cost)} ${escapeHtml(entry.currency || "")}</td>
+        <td>${escapeHtml(entry.providerFilter || "Any")}</td>
+        <td><span class="outcome ${escapeHtml(entry.phase)}">${escapeHtml(entry.phase.replaceAll("_", " "))}</span></td>
+        <td>${entry.codeReceived ? "Received" : "No"}</td>
+      </tr>`).join("")
+    : '<tr><td colspan="6" class="empty-cell">No tracked purchases yet.</td></tr>';
 }
 
 function escapeHtml(value) {

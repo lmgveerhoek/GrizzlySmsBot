@@ -66,11 +66,25 @@ h2 { margin-bottom: 0; font-size: 1.15rem; }
 .text-button:hover { color: var(--text); }
 .connection { color: var(--amber); font-size: .82rem; }
 .connection.online { color: var(--green); }
-.activity-card { padding: 24px; }
+.activity-card, .history-card { padding: 24px; }
 .sms-card { padding: 24px; display: grid; gap: 20px; border-left: 5px solid var(--green); }
 .sms-content { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-raised); }
 .sms-message { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: clamp(1.8rem, 6vw, 3rem); font-weight: 750; letter-spacing: .08em; user-select: all; }
 .sms-note { margin: -8px 0 0; font-size: .8rem; }
+.history-summary { margin: 22px 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.history-summary div { padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-raised); }
+.history-summary span { display: block; margin-bottom: 8px; color: var(--muted); font-size: .76rem; }
+.history-summary strong { font-size: 1.3rem; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+th, td { padding: 12px 10px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; }
+th { color: var(--muted); font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; }
+td { color: var(--text); }
+.outcome { border-radius: 999px; padding: 4px 8px; background: var(--panel-raised); font-size: .72rem; font-weight: 700; text-transform: capitalize; }
+.outcome.completed { color: var(--green); }
+.outcome.cancelled, .outcome.failed { color: var(--red); }
+.empty-cell { padding: 25px 10px; color: var(--muted); text-align: center; }
+.history-note { margin: 16px 0 0; font-size: .75rem; }
 .events { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .events li { display: grid; grid-template-columns: 120px 1fr; gap: 14px; padding: 11px 0; border-top: 1px solid var(--line); color: var(--muted); }
 .events time { font-variant-numeric: tabular-nums; font-size: .78rem; }
@@ -98,4 +112,5 @@ dialog::backdrop { background: rgb(0 0 0 / 70%); }
   .actions .button { width: 100%; }
   .copy-controls .button { width: 100%; }
   .sms-content { align-items: stretch; flex-direction: column; }
+  .history-summary { grid-template-columns: repeat(2, 1fr); }
 }
