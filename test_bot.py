@@ -176,6 +176,15 @@ class NotificationFanoutTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_stops_on_missing_api_key_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            session = Mock()
+            session.get.return_value = response("NO_KEY")
+
+            with self.assertRaisesRegex(ValueError, "NO_KEY"):
+                watcher.acquire(session)
+
     def test_delivers_code_then_completes_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             watcher = bot.Bot(config(str(Path(directory) / "state.db")))

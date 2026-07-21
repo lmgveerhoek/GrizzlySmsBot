@@ -389,7 +389,12 @@ class Bot:
 
         number = parse_number(body)
         if not number:
-            if body in {"BAD_KEY", "NO_BALANCE", "SERVICE_UNAVAILABLE_REGION"} or (
+            if body in {
+                "BAD_KEY",
+                "NO_KEY",
+                "NO_BALANCE",
+                "SERVICE_UNAVAILABLE_REGION",
+            } or (
                 "prohibited for sale" in body.lower()
             ):
                 raise ValueError(f"Grizzly terminal error: {body}")
