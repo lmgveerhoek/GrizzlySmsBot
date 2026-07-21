@@ -6,7 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN groupadd --gid 10001 bot \
-    && useradd --uid 10001 --gid bot --no-create-home bot
+    && useradd --uid 10001 --gid bot --no-create-home bot \
+    && mkdir /data \
+    && chown bot:bot /data
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --requirement requirements.txt

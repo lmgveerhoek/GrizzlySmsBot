@@ -1,33 +1,28 @@
 # Grizzly SMS Bot
 
-Small Docker bot that repeatedly calls the Grizzly SMS `getNumber` endpoint until
-it gets a phone number. When a number is acquired, the bot sends one notification
-to an ntfy topic.
+A one-shot Grizzly SMS activation bot. It acquires one phone number, sends it to
+a Discord webhook, waits for the verification SMS, sends the code once, completes
+the activation, and exits. It never automatically starts another purchase.
 
-## How It Works
-
-The bot starts several worker threads. Each worker calls the Grizzly SMS API with
-the configured service, country, max price, and optional provider IDs.
-
-When Grizzly returns:
-
-```text
-ACCESS_NUMBER:<activation_id>:<phone_number>
-```
-
-the bot logs the number and sends a notification to ntfy.
-
-If Grizzly returns `NO_NUMBERS`, the bot keeps polling. If Grizzly returns an HTTP
-error, the bot pauses briefly before sending more requests.
+The activation ID is persisted in SQLite. If the process stops while waiting for
+the SMS, the next manual start resumes the same activation instead of buying a
+second number.
 
 ## Requirements
 
-- [Docker](https://www.docker.com/) with Docker Compose
-- A [Grizzly SMS](https://grizzlysms.com/) API key
-- An [ntfy](https://ntfy.sh/) topic URL
+- [Docker](https://www.docker.com/) with Docker Compose, or Python 3.13+
+- A [Grizzly SMS](https://grizzlysms.com/) API key and account balance
+- A private Discord channel with an incoming webhook
 
-ntfy is a simple notification app. This bot uses it to send a push notification
-when Grizzly SMS returns a phone number.
+Treat the Grizzly API key and Discord webhook URL as secrets. Anyone with access
+to the Discord channel can read the purchased number and verification code.
+
+## Discord Webhook
+
+In Discord, create a private channel, then open **Edit Channel > Integrations >
+Webhooks** and create a webhook. Copy its URL into `DISCORD_WEBHOOK_URL`. The bot
+disables all Discord mentions in its payloads, so SMS content cannot trigger
+`@everyone`, roles, or users.
 
 ## Quick Start
 
@@ -35,7 +30,7 @@ when Grizzly SMS returns a phone number.
 cp .env.example .env
 ```
 
-Edit `.env` with your own values:
+Edit `.env`:
 
 ```env
 GRIZZLY_API_KEY=your_grizzly_api_key
@@ -44,108 +39,72 @@ COUNTRY=62
 MAX_PRICE=2
 PROVIDER_IDS=311
 
-NTFY_URL=https://ntfy.sh/your-topic
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+DISCORD_MAX_RETRIES=5
 
-THREADS=10
-MAX_REQUESTS_PER_SECOND=5
+MAX_REQUESTS_PER_SECOND=2
 REQUEST_TIMEOUT_SECONDS=10
 STATUS_EVERY_REQUESTS=100
+SMS_POLL_SECONDS=5
+ACTIVATION_TIMEOUT_SECONDS=900
 LOG_LEVEL=INFO
 ```
 
-By default, this example targets **Apple** with `SERVICE=wx` and **Turkey** with
-`COUNTRY=62`. You can verify service and country codes in the Grizzly SMS
-[API documentation](https://grizzlysms.com/docs-old), the
-[Apple service page](https://grizzlysms.com/apple), and the
-[price/country table](https://grizzlysms.com/price).
-
-Start the bot:
+Start one activation run:
 
 ```bash
-docker compose up -d --build
+docker compose up --build
 ```
 
-Watch logs:
+The container deliberately has no restart policy. It exits after a code is
+delivered, when the activation expires or fails, or when you stop it. Run the
+same command again to intentionally acquire a new number.
+
+Watch a running container from another terminal:
 
 ```bash
 docker compose logs -f --tail=100
 ```
 
-Stop the bot:
+Stop a run:
 
 ```bash
 docker compose down
 ```
 
+## Lifecycle
+
+1. Poll Grizzly until one number is available.
+2. Persist the activation ID and number before notifying Discord.
+3. Send the number and activation ID to Discord.
+4. Mark the activation ready and poll Grizzly for the SMS code.
+5. Send the code to Discord without logging it locally.
+6. Complete the activation and exit.
+
+The bot cancels an activation after `ACTIVATION_TIMEOUT_SECONDS`. A state database
+inside the named Docker volume preserves unfinished activations across an
+interruption. `STATE_DB_PATH` defaults to `/data/grizzlysms.db` in Docker and can
+be overridden in `.env`.
+
 ## Configuration
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `GRIZZLY_API_KEY` | yes | Your Grizzly SMS API key. |
-| `SERVICE` | yes | Grizzly service code. The example `wx` is Apple. See the [API docs](https://grizzlysms.com/docs-old) and [Apple page](https://grizzlysms.com/apple). |
-| `COUNTRY` | yes | Grizzly country code. The example `62` is Turkey. See the [API docs](https://grizzlysms.com/docs-old) and [price/country table](https://grizzlysms.com/price). |
-| `MAX_PRICE` | yes | Maximum price accepted by Grizzly SMS. |
-| `PROVIDER_IDS` | no | Comma-separated provider IDs. Leave empty to omit `providerIds`. |
-| `NTFY_URL` | yes | ntfy topic URL used for notifications. |
-| `THREADS` | yes | Number of worker threads. |
-| `MAX_REQUESTS_PER_SECOND` | yes | Global request start limit shared by all workers. |
-| `REQUEST_TIMEOUT_SECONDS` | yes | HTTP timeout for Grizzly and ntfy requests. |
-| `STATUS_EVERY_REQUESTS` | no | Log a progress message every N requests. Defaults to `100`. |
-| `LOG_LEVEL` | no | Python logging level, for example `INFO` or `DEBUG`. |
-| `GRIZZLY_API_URL` | no | Override the Grizzly API endpoint. Mostly useful for debugging. |
-
-## Logs
-
-At `LOG_LEVEL=INFO`, the bot logs startup, ntfy connectivity, progress, errors,
-and acquired numbers.
-
-Example:
-
-```text
-startup service=wx country=62 maxPrice=2 providerIds=311 workers=10 limit=5.0/s
-ntfy test: OK
-still polling requests=100 no_numbers=100 acquired=0
-still polling requests=200 no_numbers=200 acquired=0
-number acquired worker=4 activation=123456 number=33612345678
-notification sent activation=123456
-```
-
-## Provider IDs
-
-`PROVIDER_IDS` is optional.
-
-Use a provider:
-
-```env
-PROVIDER_IDS=311
-```
-
-Use multiple providers:
-
-```env
-PROVIDER_IDS=311,312
-```
-
-Do not send `providerIds` at all:
-
-```env
-PROVIDER_IDS=
-```
-
-## Tuning
-
-Start with conservative values:
-
-```env
-THREADS=5
-MAX_REQUESTS_PER_SECOND=2
-```
-
-Increase them slowly if your machine, network, and Grizzly SMS account can handle
-it. If you receive HTTP errors, lower `THREADS` or `MAX_REQUESTS_PER_SECOND`.
-
-
-
+| `GRIZZLY_API_KEY` | yes | Grizzly API key. |
+| `SERVICE` | yes | Grizzly service code, such as `wx` for Apple. |
+| `COUNTRY` | yes | Grizzly country code; `any` is also supported by Grizzly. |
+| `MAX_PRICE` | yes | Maximum activation price. |
+| `PROVIDER_IDS` | no | Comma-separated provider IDs; omit when empty. |
+| `DISCORD_WEBHOOK_URL` | yes | Private Discord incoming-webhook URL. |
+| `DISCORD_MAX_RETRIES` | no | Notification attempts for network, 429, and 5xx errors. Defaults to `5`. |
+| `MAX_REQUESTS_PER_SECOND` | yes | Maximum number-acquisition request rate. |
+| `REQUEST_TIMEOUT_SECONDS` | yes | HTTP request timeout. |
+| `STATUS_EVERY_REQUESTS` | no | Progress log frequency. Defaults to `100`. |
+| `SMS_POLL_SECONDS` | no | Delay between SMS-status polls. Defaults to `5`. |
+| `ACTIVATION_TIMEOUT_SECONDS` | no | Maximum wait for an SMS. Defaults to `900`. |
+| `STATE_DB_PATH` | no | SQLite state path. Docker defaults to `/data/grizzlysms.db`. |
+| `LOG_LEVEL` | no | Python logging level, such as `INFO` or `DEBUG`. |
+| `GRIZZLY_API_URL` | no | Override the Grizzly endpoint for testing. |
 
 ## Running Without Docker
 
@@ -156,5 +115,16 @@ pip install -r requirements.txt
 set -a
 source .env
 set +a
-python bot.py
+STATE_DB_PATH=./grizzlysms.db python bot.py
 ```
+
+## Tests
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
+```
+
+## Scope
+
+Use this tool only where you are authorized to receive the relevant SMS messages
+and in accordance with both Grizzly's terms and the target service's terms.

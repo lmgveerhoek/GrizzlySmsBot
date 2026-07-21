@@ -37,6 +37,13 @@ def env_float(name: str, minimum: float = 0.1) -> float:
     return value
 
 
+def env_float_optional(name: str, default: float, minimum: float = 0.1) -> float:
+    value = float(os.getenv(name, default))
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     api_key: str
@@ -67,11 +74,11 @@ class Config:
             status_every=env_int_optional("STATUS_EVERY_REQUESTS", 100),
             discord_webhook_url=env_required("DISCORD_WEBHOOK_URL"),
             discord_max_retries=env_int_optional("DISCORD_MAX_RETRIES", 5),
-            sms_poll_seconds=env_float("SMS_POLL_SECONDS", 1),
+            sms_poll_seconds=env_float_optional("SMS_POLL_SECONDS", 5, 1),
             activation_timeout_seconds=env_int_optional(
                 "ACTIVATION_TIMEOUT_SECONDS", 900
             ),
-            state_db_path=os.getenv("STATE_DB_PATH", "/data/grizzlysms.db"),
+            state_db_path=os.getenv("STATE_DB_PATH", "grizzlysms.db"),
             api_url=os.getenv("GRIZZLY_API_URL", API_URL),
         )
 
@@ -388,19 +395,28 @@ class Bot:
         self.stop.set()
 
     def wait_for_code(self, session: requests.Session, activation: Activation) -> None:
-        if not self.change_status(session, activation, 1):
+        if activation.phase != "code_delivered" and not self.change_status(
+            session, activation, 1
+        ):
             self.change_status(session, activation, 8)
             self.finish(activation, "failed")
             return
-        self.store.save(
-            Activation(
+        if activation.phase != "code_delivered":
+            activation = Activation(
                 activation.activation_id,
                 activation.phone_number,
                 activation.acquired_at,
                 "waiting_for_sms",
             )
-        )
+            self.store.save(activation)
         while not self.stop.requested:
+            if activation.phase == "code_delivered":
+                if self.change_status(session, activation, 6):
+                    self.finish(activation, "completed")
+                    return
+                self.stop.wait(self.config.sms_poll_seconds)
+                continue
+
             if time.time() - activation.acquired_at >= self.config.activation_timeout_seconds:
                 self.change_status(session, activation, 8)
                 self.send_notification(
@@ -423,8 +439,18 @@ class Bot:
                     f"Code: {code}\nActivation: {activation.activation_id}",
                     urgent=True,
                 ):
-                    self.change_status(session, activation, 6)
-                    self.finish(activation, "code_delivered")
+                    delivered = Activation(
+                        activation.activation_id,
+                        activation.phone_number,
+                        activation.acquired_at,
+                        "code_delivered",
+                    )
+                    self.store.save(delivered)
+                    if self.change_status(session, delivered, 6):
+                        self.finish(delivered, "completed")
+                    else:
+                        activation = delivered
+                        self.stop.wait(self.config.sms_poll_seconds)
                 else:
                     self.stop.wait(self.config.sms_poll_seconds)
                 continue
@@ -455,7 +481,11 @@ class Bot:
         LOG.info("Discord test: %s", "OK" if result else "FAILED")
 
         activation = self.store.load()
-        if activation and activation.phase in {"acquired", "waiting_for_sms"}:
+        if activation and activation.phase in {
+            "acquired",
+            "waiting_for_sms",
+            "code_delivered",
+        }:
             LOG.info("resuming activation=%s", activation.activation_id)
         elif activation:
             LOG.info("clearing terminal activation=%s", activation.activation_id)

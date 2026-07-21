@@ -12,6 +12,8 @@ services:
       - ALL
     volumes:
       - grizzlysms-state:/data
+    environment:
+      STATE_DB_PATH: ${STATE_DB_PATH:-/data/grizzlysms.db}
 
 volumes:
   grizzlysms-state:
