@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -9,6 +10,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import requests
@@ -128,7 +130,7 @@ class Config:
     def params(self) -> dict[str, str]:
         params = {
             "api_key": self.api_key,
-            "action": "getNumber",
+            "action": "getNumberV2",
             "service": self.service,
             "country": self.country,
             "maxPrice": self.max_price,
@@ -156,11 +158,34 @@ class RateLimiter:
         self.next_request = max(self.next_request, time.monotonic() + seconds)
 
 
-def parse_number(body: str) -> tuple[str, str] | None:
-    parts = body.split(":", 2)
-    if len(parts) == 3 and parts[0] == "ACCESS_NUMBER" and all(parts[1:]):
-        return parts[1], parts[2]
-    return None
+@dataclass(frozen=True)
+class AcquisitionDetails:
+    activation_id: str
+    phone_number: str
+    cost: str
+    currency: str | None
+    country_code: str | None
+
+
+def parse_number_v2(body: str) -> AcquisitionDetails | None:
+    try:
+        payload = json.loads(body, parse_float=Decimal)
+        activation_id = str(payload["activationId"])
+        phone_number = str(payload["phoneNumber"])
+        cost = str(Decimal(str(payload["activationCost"])))
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, InvalidOperation):
+        return None
+    if not activation_id or not phone_number:
+        return None
+    currency = payload.get("currency")
+    country_code = payload.get("countryCode")
+    return AcquisitionDetails(
+        activation_id,
+        phone_number,
+        cost,
+        str(currency) if currency is not None else None,
+        str(country_code) if country_code is not None else None,
+    )
 
 
 def parse_code(body: str) -> str | None:
@@ -218,6 +243,22 @@ class StateStore:
             }
             if "sms_code" not in columns:
                 connection.execute("ALTER TABLE activation ADD COLUMN sms_code TEXT")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activation_history (
+                    activation_id TEXT PRIMARY KEY,
+                    phone_number TEXT NOT NULL,
+                    acquired_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    phase TEXT NOT NULL,
+                    cost TEXT NOT NULL,
+                    currency TEXT,
+                    country_code TEXT,
+                    provider_filter TEXT,
+                    code_received INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
 
     def connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
@@ -232,26 +273,128 @@ class StateStore:
 
     def save(self, activation: Activation) -> None:
         with self.connection() as connection:
+            self._save_activation(connection, activation)
+
+    @staticmethod
+    def _save_activation(
+        connection: sqlite3.Connection, activation: Activation
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO activation
+                (singleton, activation_id, phone_number, acquired_at, phase, sms_code)
+            VALUES (1, ?, ?, ?, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                activation_id = excluded.activation_id,
+                phone_number = excluded.phone_number,
+                acquired_at = excluded.acquired_at,
+                phase = excluded.phase,
+                sms_code = excluded.sms_code
+            """,
+            (
+                activation.activation_id,
+                activation.phone_number,
+                activation.acquired_at,
+                activation.phase,
+                activation.sms_code,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE activation_history
+            SET phase = ?, updated_at = ?,
+                code_received = CASE WHEN ? IS NOT NULL THEN 1 ELSE code_received END
+            WHERE activation_id = ?
+            """,
+            (
+                activation.phase,
+                time.time(),
+                activation.sms_code,
+                activation.activation_id,
+            ),
+        )
+
+    def record_acquisition(
+        self,
+        activation: Activation,
+        details: AcquisitionDetails,
+        provider_filter: str | None,
+    ) -> None:
+        with self.connection() as connection:
             connection.execute(
                 """
-                INSERT INTO activation
-                    (singleton, activation_id, phone_number, acquired_at, phase, sms_code)
-                VALUES (1, ?, ?, ?, ?, ?)
-                ON CONFLICT(singleton) DO UPDATE SET
-                    activation_id = excluded.activation_id,
-                    phone_number = excluded.phone_number,
-                    acquired_at = excluded.acquired_at,
-                    phase = excluded.phase,
-                    sms_code = excluded.sms_code
+                INSERT OR IGNORE INTO activation_history (
+                    activation_id, phone_number, acquired_at, updated_at, phase,
+                    cost, currency, country_code, provider_filter, code_received
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     activation.activation_id,
                     activation.phone_number,
                     activation.acquired_at,
+                    activation.acquired_at,
                     activation.phase,
-                    activation.sms_code,
+                    details.cost,
+                    details.currency,
+                    details.country_code,
+                    provider_filter,
                 ),
             )
+            self._save_activation(connection, activation)
+
+    def history(self, limit: int = 100) -> list[dict[str, object]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT activation_id, phone_number, acquired_at, updated_at, phase,
+                       cost, currency, country_code, provider_filter, code_received
+                FROM activation_history
+                ORDER BY acquired_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        entries = []
+        for row in rows:
+            international, national = phone_representations(row[1])
+            entries.append(
+                {
+                    "activationId": row[0],
+                    "phoneNumber": international,
+                    "phoneNumberNational": national,
+                    "acquiredAt": datetime.fromtimestamp(
+                        row[2], timezone.utc
+                    ).isoformat(),
+                    "updatedAt": datetime.fromtimestamp(
+                        row[3], timezone.utc
+                    ).isoformat(),
+                    "phase": row[4],
+                    "cost": row[5],
+                    "currency": row[6],
+                    "countryCode": row[7],
+                    "providerFilter": row[8],
+                    "codeReceived": bool(row[9]),
+                }
+            )
+        return entries
+
+    def history_summary(self) -> dict[str, object]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT phase, cost, currency, code_received FROM activation_history"
+            ).fetchall()
+        gross_values: dict[str, Decimal] = {}
+        for _, cost, currency, _ in rows:
+            key = currency or "unknown"
+            gross_values[key] = gross_values.get(key, Decimal("0")) + Decimal(cost)
+        return {
+            "attempts": len(rows),
+            "codesReceived": sum(bool(row[3]) for row in rows),
+            "unsuccessful": sum(row[0] in {"cancelled", "failed"} for row in rows),
+            "grossPurchaseValues": {
+                currency: str(value) for currency, value in gross_values.items()
+            },
+        }
 
     def clear(self) -> None:
         with self.connection() as connection:
@@ -442,8 +585,8 @@ class Bot:
 
         self.record_request()
 
-        number = parse_number(body)
-        if not number:
+        details = parse_number_v2(body)
+        if not details:
             if body in {
                 "BAD_KEY",
                 "NO_KEY",
@@ -457,13 +600,22 @@ class Bot:
             LOG.warning("Grizzly response: %s", body[:100])
             return None
 
-        activation_id, phone_number = number
+        activation_id = details.activation_id
+        phone_number = details.phone_number
+        activation = Activation(activation_id, phone_number, time.time(), "acquired")
+        self.store.record_acquisition(
+            activation,
+            details,
+            self.config.provider_ids,
+        )
         LOG.info(
-            "number acquired activation=%s number=%s",
+            "number acquired activation=%s number=%s cost=%s currency=%s",
             activation_id,
             phone_number,
+            details.cost,
+            details.currency or "unknown",
         )
-        return Activation(activation_id, phone_number, time.time(), "acquired")
+        return activation
 
     def change_status(self, session: requests.Session, activation: Activation, status: int) -> bool:
         try:
@@ -890,6 +1042,8 @@ class ActivationController:
                 "canRetry": retryable,
                 "lastError": self.last_error,
                 "events": list(self.events),
+                "history": self.store.history(),
+                "historySummary": self.store.history_summary(),
             }
 
     def shutdown(self) -> None:

@@ -39,12 +39,15 @@ def config(state_db_path: str, ntfy_url: Optional[str] = None) -> bot.Config:
 
 
 class ParsingTests(unittest.TestCase):
-    def test_parse_number(self) -> None:
+    def test_parse_number_v2(self) -> None:
         self.assertEqual(
-            bot.parse_number("ACCESS_NUMBER:123:447700900123"),
-            ("123", "447700900123"),
+            bot.parse_number_v2(
+                '{"activationId":123,"phoneNumber":"447700900123",'
+                '"activationCost":0.4,"currency":978,"countryCode":"16"}'
+            ),
+            bot.AcquisitionDetails("123", "447700900123", "0.4", "978", "16"),
         )
-        self.assertIsNone(bot.parse_number("NO_NUMBERS"))
+        self.assertIsNone(bot.parse_number_v2("NO_NUMBERS"))
 
     def test_parse_code(self) -> None:
         self.assertEqual(bot.parse_code("STATUS_OK:123456"), "123456")
@@ -64,6 +67,37 @@ class StateStoreTests(unittest.TestCase):
             activation = bot.Activation("123", "447700900123", 1.0, "waiting_for_sms")
             store.save(activation)
             self.assertEqual(store.load(), activation)
+
+    def test_records_and_summarizes_activation_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = bot.StateStore(str(Path(directory) / "state.db"))
+            first = bot.Activation("123", "905314393988", 1.0, "acquired")
+            second = bot.Activation("456", "31612345678", 2.0, "acquired")
+            store.record_acquisition(
+                first,
+                bot.AcquisitionDetails("123", first.phone_number, "0.4", "978", "62"),
+                "311,415",
+            )
+            store.save(
+                bot.Activation("123", first.phone_number, 1.0, "completed", "654321")
+            )
+            store.record_acquisition(
+                second,
+                bot.AcquisitionDetails("456", second.phone_number, "1.2", "978", "48"),
+                "311",
+            )
+            store.save(bot.Activation("456", second.phone_number, 2.0, "cancelled"))
+
+            history = store.history()
+            summary = store.history_summary()
+
+            self.assertEqual([entry["activationId"] for entry in history], ["456", "123"])
+            self.assertEqual(history[0]["providerFilter"], "311")
+            self.assertTrue(history[1]["codeReceived"])
+            self.assertEqual(summary["attempts"], 2)
+            self.assertEqual(summary["codesReceived"], 1)
+            self.assertEqual(summary["unsuccessful"], 1)
+            self.assertEqual(summary["grossPurchaseValues"], {"978": "1.6"})
             store.clear()
             self.assertIsNone(store.load())
 
@@ -230,6 +264,24 @@ class LifecycleTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "NO_KEY"):
                 watcher.acquire(session)
+
+    def test_acquires_v2_number_and_records_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            session = Mock()
+            session.get.return_value = response(
+                '{"activationId":123,"phoneNumber":"905314393988",'
+                '"activationCost":0.55,"currency":840,"countryCode":"62"}'
+            )
+
+            activation = watcher.acquire(session)
+
+            self.assertEqual(activation.activation_id, "123")
+            self.assertEqual(session.get.call_args.kwargs["params"]["action"], "getNumberV2")
+            history = watcher.store.history()
+            self.assertEqual(history[0]["cost"], "0.55")
+            self.assertEqual(history[0]["currency"], "840")
+            self.assertEqual(history[0]["providerFilter"], None)
 
     def test_delivers_code_then_completes_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
