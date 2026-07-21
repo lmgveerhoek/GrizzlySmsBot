@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>Grizzly SMS Bot</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Activation console</p>
+      <h1>Grizzly SMS Bot</h1>
+    </div>
+    <div class="header-actions">
+      <span id="connection" class="connection">Connecting</span>
+      <button id="logout" class="text-button" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="dashboard">
+    <section id="status-card" class="card status-card state-idle">
+      <div class="status-heading">
+        <span id="phase" class="phase-pill">Idle</span>
+        <span id="countdown" class="countdown">No active timeout</span>
+      </div>
+      <p class="label">Current phone number</p>
+      <p id="phone-number" class="phone-number">No number acquired</p>
+      <div class="activation-meta">
+        <span>Activation <strong id="activation-id">None</strong></span>
+        <span>Elapsed <strong id="elapsed">0s</strong></span>
+      </div>
+      <p id="last-error" class="form-error hidden"></p>
+      <div class="actions">
+        <button id="purchase" class="button primary" type="button">Get another number</button>
+        <button id="cancel" class="button danger hidden" type="button">Cancel this number</button>
+        <button id="retry" class="button secondary hidden" type="button">Retry now</button>
+      </div>
+    </section>
+
+    <section class="card activity-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Recent activity</p>
+          <h2>Lifecycle events</h2>
+        </div>
+        <button id="refresh" class="text-button" type="button">Refresh</button>
+      </div>
+      <ol id="events" class="events"><li class="empty">No activity yet.</li></ol>
+    </section>
+
+    <p class="privacy-note">Verification codes are sent through configured notifications and are never displayed in this dashboard.</p>
+  </main>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <p class="eyebrow">Confirm action</p>
+      <h2 id="dialog-title">Continue?</h2>
+      <p id="dialog-message" class="muted"></p>
+      <div class="dialog-actions">
+        <button class="button secondary" value="cancel">Go back</button>
+        <button id="dialog-confirm" class="button primary" value="confirm">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

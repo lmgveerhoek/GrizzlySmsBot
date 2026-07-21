@@ -56,6 +56,15 @@ def env_float_optional(name: str, default: float, minimum: float = 0.1) -> float
     return value
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, str(default)).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 @dataclass(frozen=True)
 class Config:
     api_key: str
@@ -73,10 +82,18 @@ class Config:
     sms_poll_seconds: float
     activation_timeout_seconds: int
     state_db_path: str
+    web_ui: bool = False
+    ui_password: str | None = None
+    web_ui_host: str = "127.0.0.1"
+    web_ui_port: int = 8080
     api_url: str = API_URL
 
     @classmethod
     def from_env(cls) -> Config:
+        web_ui = env_bool("WEB_UI")
+        ui_password = os.getenv("UI_PASSWORD", "").strip() or None
+        if web_ui and not ui_password:
+            raise ValueError("UI_PASSWORD is required when WEB_UI=true")
         return cls(
             api_key=env_required("GRIZZLY_API_KEY"),
             service=env_required("SERVICE"),
@@ -95,6 +112,10 @@ class Config:
                 "ACTIVATION_TIMEOUT_SECONDS", 900
             ),
             state_db_path=os.getenv("STATE_DB_PATH", "grizzlysms.db"),
+            web_ui=web_ui,
+            ui_password=ui_password,
+            web_ui_host=os.getenv("WEB_UI_HOST", "127.0.0.1"),
+            web_ui_port=env_int_optional("WEB_UI_PORT", 8080),
             api_url=os.getenv("GRIZZLY_API_URL", API_URL),
         )
 
@@ -836,10 +857,17 @@ def main() -> int:
         format="%(asctime)s | %(levelname)s | %(threadName)s | %(message)s",
     )
     try:
-        bot = Bot(Config.from_env())
+        config = Config.from_env()
     except (ValueError, OSError) as error:
         LOG.error("startup failed: %s", error)
         return 2
+
+    if config.web_ui:
+        from web import run_web_ui
+
+        return run_web_ui(config)
+
+    bot = Bot(config)
 
     def shutdown(_signal: int, _frame: object) -> None:
         LOG.info("shutdown requested")

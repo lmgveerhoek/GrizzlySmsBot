@@ -103,6 +103,24 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(parsed.sms_poll_seconds, 5)
             self.assertIsNone(parsed.ntfy_url)
 
+    def test_web_ui_requires_password(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GRIZZLY_API_KEY": "key",
+                "SERVICE": "wx",
+                "COUNTRY": "62",
+                "MAX_PRICE": "2",
+                "MAX_REQUESTS_PER_SECOND": "1",
+                "REQUEST_TIMEOUT_SECONDS": "1",
+                "DISCORD_WEBHOOK_URL": "https://example.test/webhook",
+                "WEB_UI": "true",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "UI_PASSWORD"):
+                bot.Config.from_env()
+
 
 class DiscordNotifierTests(unittest.TestCase):
     def test_retries_rate_limit_without_mentions(self) -> None:
