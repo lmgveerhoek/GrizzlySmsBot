@@ -28,6 +28,7 @@ class WebUiTests(unittest.TestCase):
             "timeoutRemainingSeconds": 0,
             "workerActive": False,
             "isPollingForNumber": False,
+            "canStopSearch": False,
             "acquisitionRequests": 0,
             "noNumberResponses": 0,
             "service": "wx",
@@ -95,6 +96,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn(b"Automatic replacement", response.data)
         self.assertIn(b"Inventory search", response.data)
         self.assertIn(b"search-provider-ids", response.data)
+        self.assertIn(b"stop-search", response.data)
 
     def test_status_returns_sanitized_controller_data(self) -> None:
         self.login()
@@ -123,6 +125,17 @@ class WebUiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.controller.start_purchase.assert_called_once_with()
+
+    def test_stop_search_starts_controller_action(self) -> None:
+        csrf = self.login()
+        self.controller.stop_number_search.return_value = True, "Stopping number search"
+        response = self.client.post(
+            "/api/actions/stop-search",
+            json={},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.controller.stop_number_search.assert_called_once_with()
 
     def test_invalid_action_state_returns_conflict(self) -> None:
         csrf = self.login()

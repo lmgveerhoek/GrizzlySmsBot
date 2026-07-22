@@ -56,7 +56,7 @@ When a purchase is in progress but no number has been acquired, the dashboard
 shows **Searching** rather than **Idle**. Its inventory-search panel shows live
 request and no-match counts plus the service, country, maximum price, and allowed
 provider IDs sent to Grizzly. An empty provider filter is displayed as **Any
-provider**.
+provider**. Use **Stop search** to stop polling before a number is acquired.
 
 ### Activation History
 

@@ -912,11 +912,14 @@ class Bot:
             acquired_now = activation is None
             while activation is None and self.limiter.wait(self.stop):
                 activation = self.acquire(session)
-            if activation is None or self.stop.requested:
+            if activation is None:
                 return
 
             if acquired_now:
                 self.store.save(activation)
+
+            if self.stop.requested:
+                return
 
             if activation.phase == "acquired" and not self.notify_purchase(
                 activation.activation_id, activation.phone_number
@@ -1161,6 +1164,19 @@ class ActivationController:
             self._start_worker(acquire_if_idle=True)
             return True, "Looking for a number"
 
+    def stop_number_search(self) -> tuple[bool, str]:
+        with self.lock:
+            if (
+                self.store.load()
+                or not self.worker
+                or not self.worker.is_alive()
+                or not self.bot
+            ):
+                return False, "There is no active number search to stop"
+            self.bot.stop.set()
+            self.add_event("Number search stopped", "warning")
+            return True, "Stopping number search"
+
     def cancel_active_activation(self) -> tuple[bool, str]:
         with self.lock:
             activation = self.store.load()
@@ -1283,6 +1299,7 @@ class ActivationController:
                 "timeoutRemainingSeconds": remaining,
                 "workerActive": worker_active,
                 "isPollingForNumber": is_polling_for_number,
+                "canStopSearch": is_polling_for_number,
                 "acquisitionRequests": self.acquisition_requests,
                 "noNumberResponses": self.no_number_responses,
                 "service": self.config.service,

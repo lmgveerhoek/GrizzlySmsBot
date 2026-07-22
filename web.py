@@ -94,6 +94,11 @@ def create_app(
     def purchase():
         return action("start_purchase", confirmation_required=True)
 
+    @app.post("/api/actions/stop-search")
+    @authenticated
+    def stop_search():
+        return action("stop_number_search")
+
     @app.post("/api/actions/cancel")
     @authenticated
     def cancel():

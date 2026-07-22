@@ -261,6 +261,20 @@ class NotificationFanoutTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_persists_number_acquired_while_search_is_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = bot.Bot(config(str(Path(directory) / "state.db")))
+            activation = bot.Activation("123", "447700900123", time.time(), "acquired")
+            watcher.acquire = Mock(side_effect=lambda _session: (watcher.stop.set(), activation)[1])
+            session = Mock()
+            session.__enter__ = Mock(return_value=session)
+            session.__exit__ = Mock(return_value=False)
+
+            with patch("bot.new_session", return_value=session):
+                watcher.run(notify_startup=False)
+
+            self.assertEqual(watcher.store.load(), activation)
+
     def test_reports_acquisition_progress_to_dashboard_callback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             progress = Mock()
@@ -529,6 +543,22 @@ class LifecycleTests(unittest.TestCase):
 
 
 class ActivationControllerTests(unittest.TestCase):
+    def test_stops_active_number_search(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = bot.ActivationController(
+                config(str(Path(directory) / "state.db"))
+            )
+            controller.worker = Mock()
+            controller.worker.is_alive.return_value = True
+            controller.bot = Mock()
+
+            accepted, message = controller.stop_number_search()
+
+            self.assertTrue(accepted)
+            self.assertEqual(message, "Stopping number search")
+            controller.bot.stop.set.assert_called_once_with()
+            self.assertTrue(controller.status()["canStopSearch"])
+
     def test_retry_sound_requires_one_current_browser_claim(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             controller = bot.ActivationController(

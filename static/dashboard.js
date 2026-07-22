@@ -1,7 +1,7 @@
 const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const elements = Object.fromEntries([
   "status-card", "phase", "countdown", "phone-number", "activation-id", "elapsed",
-  "last-error", "purchase", "cancel", "retry", "events", "connection", "toast",
+  "last-error", "purchase", "stop-search", "cancel", "retry", "events", "connection", "toast",
   "phone-copy-controls", "copy-full", "copy-national", "sms-card", "sms-message",
   "copy-sms", "theme-toggle", "summary-attempts", "summary-successes",
   "summary-unsuccessful", "summary-cost", "history-rows", "auto-retry-toggle",
@@ -122,6 +122,7 @@ function render(status) {
   visible(elements["sms-card"], Boolean(copyValues.sms));
   setText(elements["sms-message"], copyValues.sms);
   visible(elements.purchase, status.canPurchase);
+  visible(elements["stop-search"], status.canStopSearch);
   visible(elements.cancel, status.canCancel);
   visible(elements.retry, status.canRetry);
   const requestsSent = Number(status.acquisitionRequests || 0);
@@ -319,6 +320,9 @@ elements.purchase.addEventListener("click", () => confirmAction(
   "Purchase a number?", "This starts one paid Grizzly activation.", "Get number",
   () => postAction("/api/actions/purchase", {confirm: true})
 ));
+elements["stop-search"].addEventListener("click", () =>
+  postAction("/api/actions/stop-search")
+);
 elements.cancel.addEventListener("click", () => confirmAction(
   "Cancel this number?", "The bot will keep retrying until Grizzly confirms cancellation.", "Cancel number",
   () => postAction("/api/actions/cancel", {confirm: true})
