@@ -17,11 +17,6 @@
     <div class="header-actions">
       <span id="connection" class="connection">Connecting</span>
       <button id="theme-toggle" class="text-button" type="button" aria-label="Switch color theme">Light mode</button>
-      <label class="switch" aria-label="Toggle auto-retry">
-        <input id="auto-retry-toggle" type="checkbox">
-        <span class="switch-slider"></span>
-        <span class="switch-label">Auto-retry</span>
-      </label>
       <button id="logout" class="text-button" type="button">Sign out</button>
     </div>
   </header>
@@ -43,6 +38,32 @@
       <div class="activation-meta">
         <span>Activation <strong id="activation-id">None</strong></span>
         <span>Elapsed <strong id="elapsed">0s</strong></span>
+      </div>
+      <div class="search-panel">
+        <div class="search-heading">
+          <div>
+            <p class="automation-title">Inventory search</p>
+            <p id="search-state" class="search-state">Not searching</p>
+          </div>
+          <span id="search-summary" class="search-summary">No requests sent</span>
+        </div>
+        <div class="search-details">
+          <span>Service <strong id="search-service">-</strong></span>
+          <span>Country <strong id="search-country">-</strong></span>
+          <span>Max price <strong id="search-max-price">-</strong></span>
+          <span>Provider IDs <strong id="search-provider-ids">Any provider</strong></span>
+        </div>
+      </div>
+      <div class="automation-panel">
+        <div>
+          <p class="automation-title">Automatic replacement</p>
+          <p id="auto-retry-description" class="automation-description">Cancel after 3 minutes without an SMS, then try another number.</p>
+        </div>
+        <label class="switch" aria-label="Toggle automatic replacement">
+          <input id="auto-retry-toggle" type="checkbox">
+          <span class="switch-slider"></span>
+          <span id="auto-retry-label" class="switch-label">Off</span>
+        </label>
       </div>
       <p id="last-error" class="form-error hidden"></p>
       <div class="actions">

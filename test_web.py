@@ -27,10 +27,23 @@ class WebUiTests(unittest.TestCase):
             "elapsedSeconds": 0,
             "timeoutRemainingSeconds": 0,
             "workerActive": False,
+            "isPollingForNumber": False,
+            "acquisitionRequests": 0,
+            "noNumberResponses": 0,
+            "service": "wx",
+            "country": "62",
+            "maxPrice": "2",
+            "providerIds": None,
             "canPurchase": True,
             "canCancel": False,
             "canRetry": False,
             "autoRetryEnabled": False,
+            "autoRetryWaiting": False,
+            "autoRetryStage": None,
+            "autoRetrySignal": 0,
+            "autoRetryTimeoutSeconds": 180,
+            "autoRetryDelaySeconds": 5,
+            "autoRetrySoundLeadSeconds": 5,
             "lastError": None,
             "events": [],
             "history": [],
@@ -79,6 +92,9 @@ class WebUiTests(unittest.TestCase):
         self.assertIn(b"Numbers tried", response.data)
         self.assertIn(b"Allowed providers", response.data)
         self.assertIn(b"auto-retry-toggle", response.data)
+        self.assertIn(b"Automatic replacement", response.data)
+        self.assertIn(b"Inventory search", response.data)
+        self.assertIn(b"search-provider-ids", response.data)
 
     def test_status_returns_sanitized_controller_data(self) -> None:
         self.login()
@@ -121,16 +137,59 @@ class WebUiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 409)
 
-    def test_toggle_auto_retry_endpoint(self) -> None:
+    def test_set_auto_retry_endpoint(self) -> None:
         csrf = self.login()
-        self.controller.toggle_auto_retry.return_value = True, "Auto-retry toggled"
+        self.controller.set_auto_retry.return_value = True, "Auto-retry enabled"
         response = self.client.post(
-            "/api/actions/toggle-auto-retry",
-            json={},
+            "/api/actions/auto-retry",
+            json={"enabled": True},
             headers={"X-CSRF-Token": csrf},
         )
         self.assertEqual(response.status_code, 200)
-        self.controller.toggle_auto_retry.assert_called_once_with()
+        self.controller.set_auto_retry.assert_called_once_with(True)
+
+    def test_claim_and_acknowledge_retry_sound_endpoints(self) -> None:
+        csrf = self.login()
+        self.controller.claim_auto_retry_sound.return_value = (
+            True,
+            "Retry alert claimed",
+        )
+        self.controller.acknowledge_auto_retry_sound.return_value = (
+            True,
+            "Retry alert acknowledged",
+        )
+        claim = self.client.post(
+            "/api/actions/claim-retry-sound",
+            json={"signal": 3},
+            headers={"X-CSRF-Token": csrf},
+        )
+        response = self.client.post(
+            "/api/actions/ack-retry-sound",
+            json={"signal": 3},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(claim.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        self.controller.claim_auto_retry_sound.assert_called_once_with(3)
+        self.controller.acknowledge_auto_retry_sound.assert_called_once_with(3)
+
+    def test_auto_retry_endpoints_reject_non_object_json(self) -> None:
+        csrf = self.login()
+        headers = {"X-CSRF-Token": csrf}
+
+        toggle = self.client.post(
+            "/api/actions/auto-retry", json=[], headers=headers
+        )
+        claim = self.client.post(
+            "/api/actions/claim-retry-sound", json=True, headers=headers
+        )
+        acknowledge = self.client.post(
+            "/api/actions/ack-retry-sound", json=True, headers=headers
+        )
+
+        self.assertEqual(toggle.status_code, 400)
+        self.assertEqual(claim.status_code, 400)
+        self.assertEqual(acknowledge.status_code, 400)
 
     def test_web_server_uses_single_thread_and_quiet_access_logs(self) -> None:
         app = Mock()

@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Callable
 
 import requests
 import phonenumbers
@@ -94,6 +95,7 @@ class Config:
     auto_retry_enabled: bool = False
     auto_retry_timeout_seconds: int = 180
     auto_retry_delay_seconds: int = 5
+    auto_retry_sound_lead_seconds: int = 5
     api_url: str = API_URL
 
     @classmethod
@@ -129,6 +131,9 @@ class Config:
             auto_retry_enabled=env_bool("AUTO_RETRY_ENABLED"),
             auto_retry_timeout_seconds=env_int_optional("AUTO_RETRY_TIMEOUT_SECONDS", 180),
             auto_retry_delay_seconds=env_int_optional("AUTO_RETRY_DELAY_SECONDS", 5),
+            auto_retry_sound_lead_seconds=env_int_optional(
+                "AUTO_RETRY_SOUND_LEAD_SECONDS", 5, minimum=5
+            ),
             api_url=os.getenv("GRIZZLY_API_URL", API_URL),
         )
 
@@ -522,8 +527,14 @@ def new_session() -> requests.Session:
 
 
 class Bot:
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         self.config = config
+        self.activation_timeout_seconds = config.activation_timeout_seconds
+        self.activation_timeout_lock = threading.Lock()
         self.stop = StopSignal()
         self.limiter = RateLimiter(config.rate)
         self.notifiers = [
@@ -540,6 +551,7 @@ class Bot:
         self.store = StateStore(config.state_db_path)
         self.total_requests = 0
         self.no_numbers = 0
+        self.progress_callback = progress_callback
 
     def send_notification(self, title: str, message: str, urgent: bool = False) -> bool:
         results = [notifier.send(title, message, urgent) for notifier in self.notifiers]
@@ -549,7 +561,12 @@ class Bot:
         self.total_requests += 1
         if no_number:
             self.no_numbers += 1
-        if self.total_requests % self.config.status_every == 0:
+        if self.progress_callback:
+            self.progress_callback(self.total_requests, self.no_numbers)
+        if (
+            self.total_requests == 1
+            or self.total_requests % self.config.status_every == 0
+        ):
             LOG.info(
                 "still polling requests=%s no_numbers=%s",
                 self.total_requests,
@@ -675,6 +692,10 @@ class Bot:
         )
         self.stop.set()
 
+    def set_activation_timeout(self, seconds: int) -> None:
+        with self.activation_timeout_lock:
+            self.activation_timeout_seconds = seconds
+
     def request_cancel(self) -> bool:
         activation = self.store.load()
         if not activation or activation.phase not in ACTIVE_PHASES:
@@ -760,14 +781,21 @@ class Bot:
                 self.stop.wait(self.config.sms_poll_seconds)
                 continue
 
-            if time.time() - activation.acquired_at >= self.config.activation_timeout_seconds:
-                activation = Activation(
-                    activation.activation_id,
-                    activation.phone_number,
-                    activation.acquired_at,
-                    "cancellation_pending",
-                )
-                self.store.save(activation)
+            timed_out = False
+            with self.activation_timeout_lock:
+                if (
+                    time.time() - activation.acquired_at
+                    >= self.activation_timeout_seconds
+                ):
+                    activation = Activation(
+                        activation.activation_id,
+                        activation.phone_number,
+                        activation.acquired_at,
+                        "cancellation_pending",
+                    )
+                    self.store.save(activation)
+                    timed_out = True
+            if timed_out:
                 self.send_notification(
                     "Grizzly SMS timed out",
                     f"Activation: {activation.activation_id}",
@@ -912,6 +940,18 @@ class ActivationController:
         self.events: deque[dict[str, str]] = deque(maxlen=50)
         self.last_error: str | None = None
         self.auto_retry_enabled = config.auto_retry_enabled
+        self.auto_retry_interrupt = threading.Event()
+        self.auto_retry_waiting = False
+        self.auto_retry_stage: str | None = None
+        self.auto_retry_signal = 0
+        self.auto_retry_claimed_signal = 0
+        self.auto_retry_claim_deadline = 0.0
+        self.auto_retry_acknowledged_signal = 0
+        self.auto_retry_attempt_active = False
+        self.cancel_auto_retry_attempt = False
+        self.shutting_down = False
+        self.acquisition_requests = 0
+        self.no_number_responses = 0
 
     def add_event(self, message: str, level: str = "info") -> None:
         with self.lock:
@@ -940,15 +980,12 @@ class ActivationController:
 
     def _start_worker(self, acquire_if_idle: bool) -> None:
         with self.lock:
+            if self.shutting_down:
+                raise RuntimeError("Controller is shutting down")
             if self.worker and self.worker.is_alive():
                 raise RuntimeError("Activation work is already running")
-            bot_config = self.config
-            if self.auto_retry_enabled:
-                bot_config = replace(
-                    self.config,
-                    activation_timeout_seconds=self.config.auto_retry_timeout_seconds,
-                )
-            self.bot = Bot(bot_config)
+            self.auto_retry_interrupt.clear()
+            self.bot = self._new_bot()
             self.worker = threading.Thread(
                 target=self._run_worker,
                 args=(self.bot, acquire_if_idle),
@@ -957,33 +994,160 @@ class ActivationController:
             )
             self.worker.start()
 
+    def _new_bot(self) -> Bot:
+        self.acquisition_requests = 0
+        self.no_number_responses = 0
+        return Bot(self._effective_config(), self._record_acquisition_progress)
+
+    def _record_acquisition_progress(
+        self, requests_sent: int, no_number_responses: int
+    ) -> None:
+        with self.lock:
+            self.acquisition_requests = requests_sent
+            self.no_number_responses = no_number_responses
+        if requests_sent == 1:
+            self.add_event(
+                "Grizzly availability check sent; no matching number returned yet",
+                "warning" if no_number_responses else "info",
+            )
+            return
+        self.add_event(
+            "Grizzly availability checks: "
+            f"{requests_sent} requests sent, "
+            f"{no_number_responses} returned no matching number",
+            "warning" if no_number_responses == requests_sent else "info",
+        )
+
+    def _effective_config(self) -> Config:
+        timeout = (
+            self.config.auto_retry_timeout_seconds
+            if self.auto_retry_enabled
+            else self.config.activation_timeout_seconds
+        )
+        return replace(self.config, activation_timeout_seconds=timeout)
+
     def _run_worker(self, watcher: Bot, acquire_if_idle: bool) -> None:
-        try:
-            watcher.run(acquire_if_idle=acquire_if_idle, notify_startup=False)
-        except Exception as error:
-            LOG.exception("activation worker failed")
-            with self.lock:
-                self.last_error = str(error)
-            self.add_event("Activation worker failed", "error")
-        finally:
-            watcher.close()
+        current = watcher
+        should_acquire = acquire_if_idle
+        while True:
+            failed = False
+            try:
+                current.run(acquire_if_idle=should_acquire, notify_startup=False)
+            except Exception as error:
+                failed = True
+                LOG.exception("activation worker failed")
+                with self.lock:
+                    self.last_error = str(error)
+                self.add_event("Activation worker failed", "error")
+            finally:
+                current.close()
+
             activation = self.store.load()
+            with self.lock:
+                cancel_automatic_attempt = self.cancel_auto_retry_attempt
+                self.cancel_auto_retry_attempt = False
+                self.auto_retry_attempt_active = False
+            if (
+                cancel_automatic_attempt
+                and activation
+                and activation.phase in ACTIVE_PHASES
+            ):
+                self.add_event(
+                    "Auto-retry disabled; cancelling automatic purchase",
+                    "warning",
+                )
+                cancelled = Activation(
+                    activation.activation_id,
+                    activation.phone_number,
+                    activation.acquired_at,
+                    "cancellation_pending",
+                )
+                self.store.save(cancelled)
+                cleanup = Bot(self.config)
+                with self.lock:
+                    self.bot = cleanup
+                try:
+                    cleanup.run(acquire_if_idle=False, notify_startup=False)
+                except Exception as error:
+                    failed = True
+                    LOG.exception("automatic activation cleanup failed")
+                    with self.lock:
+                        self.last_error = str(error)
+                    self.add_event("Automatic activation cleanup failed", "error")
+                finally:
+                    cleanup.close()
+                    with self.lock:
+                        if self.bot is cleanup:
+                            self.bot = None
+                activation = self.store.load()
             if activation:
                 self.add_event(f"Activation state: {activation.phase}")
             with self.lock:
-                if self.bot is watcher:
+                if self.bot is current:
                     self.bot = None
                 should_retry = (
-                    self.auto_retry_enabled
+                    not failed
+                    and self.auto_retry_enabled
+                    and not self.shutting_down
                     and activation
                     and activation.phase != "completed"
                     and activation.phase not in ACTIVE_PHASES
                 )
-            if should_retry:
-                self.add_event("Auto-retry: waiting before next attempt")
-                if not watcher.stop.wait(self.config.auto_retry_delay_seconds):
-                    self.add_event("Auto-retry: starting next attempt")
-                    self._start_worker(acquire_if_idle=True)
+                if should_retry:
+                    self.auto_retry_waiting = True
+                    self.auto_retry_stage = "delay"
+            if not should_retry:
+                break
+
+            self.add_event("Auto-retry: waiting before next attempt")
+            self.auto_retry_interrupt.wait(
+                self.config.auto_retry_delay_seconds
+            )
+            with self.lock:
+                if not self.auto_retry_enabled or self.shutting_down:
+                    self.auto_retry_waiting = False
+                    self.auto_retry_stage = None
+                    break
+                self.auto_retry_interrupt.clear()
+                self.auto_retry_stage = "announcing"
+                self.auto_retry_signal += 1
+                retry_signal = self.auto_retry_signal
+                self.auto_retry_claimed_signal = 0
+                self.auto_retry_claim_deadline = 0.0
+
+            base_deadline = (
+                time.monotonic() + self.config.auto_retry_sound_lead_seconds
+            )
+            stop_retry = False
+            while True:
+                with self.lock:
+                    deadline = max(base_deadline, self.auto_retry_claim_deadline)
+                    if time.monotonic() >= deadline:
+                        self.auto_retry_stage = None
+                        break
+                self.auto_retry_interrupt.wait(
+                    min(0.25, max(0, deadline - time.monotonic()))
+                )
+                with self.lock:
+                    if not self.auto_retry_enabled or self.shutting_down:
+                        stop_retry = True
+                        self.auto_retry_stage = None
+                        break
+                    if self.auto_retry_acknowledged_signal == retry_signal:
+                        self.auto_retry_stage = None
+                        break
+                    self.auto_retry_interrupt.clear()
+
+            with self.lock:
+                self.auto_retry_waiting = False
+                self.auto_retry_stage = None
+                if stop_retry or not self.auto_retry_enabled or self.shutting_down:
+                    break
+                current = self._new_bot()
+                self.bot = current
+                self.auto_retry_attempt_active = True
+            self.add_event("Auto-retry: starting next attempt")
+            should_acquire = True
 
     def start_purchase(self) -> tuple[bool, str]:
         with self.lock:
@@ -1028,22 +1192,71 @@ class ActivationController:
             self._start_worker(acquire_if_idle=False)
             return True, "Retry started"
 
-    def toggle_auto_retry(self) -> tuple[bool, str]:
+    def set_auto_retry(self, enabled: bool) -> tuple[bool, str]:
         with self.lock:
-            self.auto_retry_enabled = not self.auto_retry_enabled
+            self.auto_retry_enabled = enabled
+            if not self.auto_retry_enabled:
+                self.auto_retry_interrupt.set()
+                if self.auto_retry_attempt_active and self.bot:
+                    self.cancel_auto_retry_attempt = True
+                    self.bot.stop.set()
+            else:
+                self.auto_retry_interrupt.clear()
+            if self.bot:
+                self.bot.set_activation_timeout(
+                    self.config.auto_retry_timeout_seconds
+                    if self.auto_retry_enabled
+                    else self.config.activation_timeout_seconds
+                )
             self.add_event(
                 "Auto-retry enabled" if self.auto_retry_enabled else "Auto-retry disabled"
             )
-            return True, "Auto-retry toggled"
+            state = "enabled" if self.auto_retry_enabled else "disabled"
+            return True, f"Auto-retry {state}"
+
+    def claim_auto_retry_sound(self, signal: int) -> tuple[bool, str]:
+        with self.lock:
+            if (
+                self.auto_retry_stage != "announcing"
+                or signal != self.auto_retry_signal
+                or signal == self.auto_retry_claimed_signal
+            ):
+                return False, "Retry alert is no longer pending"
+            self.auto_retry_claimed_signal = signal
+            self.auto_retry_claim_deadline = time.monotonic() + 3
+            self.auto_retry_interrupt.set()
+            return True, "Retry alert claimed"
+
+    def acknowledge_auto_retry_sound(self, signal: int) -> tuple[bool, str]:
+        with self.lock:
+            if (
+                self.auto_retry_stage != "announcing"
+                or signal != self.auto_retry_signal
+                or signal != self.auto_retry_claimed_signal
+            ):
+                return False, "Retry alert is no longer pending"
+            self.auto_retry_acknowledged_signal = signal
+            self.auto_retry_interrupt.set()
+            return True, "Retry alert acknowledged"
 
     def status(self) -> dict[str, object]:
         with self.lock:
             activation = self.store.load()
-            phase = activation.phase if activation else "idle"
             worker_active = bool(self.worker and self.worker.is_alive())
+            is_polling_for_number = worker_active and activation is None
+            phase = (
+                activation.phase
+                if activation
+                else "searching" if is_polling_for_number else "idle"
+            )
             elapsed = max(0, int(time.time() - activation.acquired_at)) if activation else 0
+            effective_timeout = (
+                self.config.auto_retry_timeout_seconds
+                if self.auto_retry_enabled
+                else self.config.activation_timeout_seconds
+            )
             remaining = (
-                max(0, self.config.activation_timeout_seconds - elapsed)
+                max(0, effective_timeout - elapsed)
                 if activation and phase in ACTIVE_PHASES
                 else 0
             )
@@ -1069,10 +1282,23 @@ class ActivationController:
                 "elapsedSeconds": elapsed,
                 "timeoutRemainingSeconds": remaining,
                 "workerActive": worker_active,
+                "isPollingForNumber": is_polling_for_number,
+                "acquisitionRequests": self.acquisition_requests,
+                "noNumberResponses": self.no_number_responses,
+                "service": self.config.service,
+                "country": self.config.country,
+                "maxPrice": self.config.max_price,
+                "providerIds": self.config.provider_ids,
                 "canPurchase": not active and not worker_active,
                 "canCancel": active and phase != "cancellation_pending",
                 "canRetry": retryable,
                 "autoRetryEnabled": self.auto_retry_enabled,
+                "autoRetryWaiting": self.auto_retry_waiting,
+                "autoRetryStage": self.auto_retry_stage,
+                "autoRetrySignal": self.auto_retry_signal,
+                "autoRetryTimeoutSeconds": self.config.auto_retry_timeout_seconds,
+                "autoRetryDelaySeconds": self.config.auto_retry_delay_seconds,
+                "autoRetrySoundLeadSeconds": self.config.auto_retry_sound_lead_seconds,
                 "lastError": self.last_error,
                 "events": list(self.events),
                 "history": self.store.history(),
@@ -1081,8 +1307,13 @@ class ActivationController:
 
     def shutdown(self) -> None:
         with self.lock:
+            self.shutting_down = True
+            self.auto_retry_interrupt.set()
             if self.bot:
                 self.bot.stop.set()
+            worker = self.worker
+        if worker and worker is not threading.current_thread():
+            worker.join(timeout=self.config.timeout + 5)
 
 
 def main() -> int:

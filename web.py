@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import logging
 import secrets
+import signal
 from functools import wraps
 from typing import Callable
 
@@ -103,10 +104,53 @@ def create_app(
     def retry():
         return action("retry_pending_work")
 
-    @app.post("/api/actions/toggle-auto-retry")
+    @app.post("/api/actions/auto-retry")
     @authenticated
-    def toggle_auto_retry():
-        return action("toggle_auto_retry")
+    def set_auto_retry():
+        if not valid_csrf():
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "JSON object required"}), 400
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return jsonify({"error": "enabled must be true or false"}), 400
+        accepted, message = app.controller.set_auto_retry(enabled)  # type: ignore[attr-defined]
+        if not accepted:
+            return jsonify({"error": message}), 409
+        return jsonify({"ok": True, "message": message})
+
+    @app.post("/api/actions/claim-retry-sound")
+    @authenticated
+    def claim_retry_sound():
+        if not valid_csrf():
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "JSON object required"}), 400
+        signal = payload.get("signal")
+        if type(signal) is not int:
+            return jsonify({"error": "signal must be an integer"}), 400
+        accepted, message = app.controller.claim_auto_retry_sound(signal)  # type: ignore[attr-defined]
+        if not accepted:
+            return jsonify({"error": message}), 409
+        return jsonify({"ok": True})
+
+    @app.post("/api/actions/ack-retry-sound")
+    @authenticated
+    def acknowledge_retry_sound():
+        if not valid_csrf():
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "JSON object required"}), 400
+        signal = payload.get("signal")
+        if type(signal) is not int:
+            return jsonify({"error": "signal must be an integer"}), 400
+        accepted, message = app.controller.acknowledge_auto_retry_sound(signal)  # type: ignore[attr-defined]
+        if not accepted:
+            return jsonify({"error": message}), 409
+        return jsonify({"ok": True})
 
     return app
 
@@ -117,8 +161,21 @@ def run_web_ui(config: Config) -> int:
     )
     controller = ActivationController(config)
     app = create_app(config, controller)
+
+    def shutdown(_signal: int, _frame: object) -> None:
+        controller.shutdown()
+        raise SystemExit(0)
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
     try:
         app.run(host=config.web_ui_host, port=config.web_ui_port, threaded=False)
+    except (KeyboardInterrupt, SystemExit):
+        pass
     finally:
         controller.shutdown()
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
     return 0

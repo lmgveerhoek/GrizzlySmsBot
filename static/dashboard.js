@@ -4,14 +4,20 @@ const elements = Object.fromEntries([
   "last-error", "purchase", "cancel", "retry", "events", "connection", "toast",
   "phone-copy-controls", "copy-full", "copy-national", "sms-card", "sms-message",
   "copy-sms", "theme-toggle", "summary-attempts", "summary-successes",
-  "summary-unsuccessful", "summary-cost", "history-rows", "auto-retry-toggle"
+  "summary-unsuccessful", "summary-cost", "history-rows", "auto-retry-toggle",
+  "auto-retry-label", "auto-retry-description", "search-state", "search-summary",
+  "search-service", "search-country", "search-max-price", "search-provider-ids"
 ].map(id => [id, document.getElementById(id)]));
 
 let copyValues = {full: "", national: "", sms: ""};
 let eventsSignature = "";
 let historySignature = "";
 let lastPhase = null;
+let lastAutoRetrySignal = null;
 let audioContext = null;
+let refreshSequence = 0;
+let appliedRefreshSequence = 0;
+let refreshController = null;
 
 function getAudioContext() {
   if (!audioContext) {
@@ -20,22 +26,24 @@ function getAudioContext() {
   return audioContext;
 }
 
-function playRetrySound() {
-  try {
-    const ctx = getAudioContext();
+async function playRetrySound() {
+  const ctx = getAudioContext();
+  await ctx.resume();
+  if (ctx.state !== "running") throw new Error("Audio context is suspended");
+  await new Promise((resolve) => {
     const oscillator = ctx.createOscillator();
     const gainNode = ctx.createGain();
     oscillator.connect(gainNode);
     gainNode.connect(ctx.destination);
-    oscillator.frequency.value = 440;
-    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(520, ctx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(360, ctx.currentTime + 0.5);
+    oscillator.type = "sine";
     gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+    oscillator.onended = resolve;
     oscillator.start(ctx.currentTime);
     oscillator.stop(ctx.currentTime + 0.5);
-  } catch (error) {
-    console.error('Failed to play retry sound:', error);
-  }
+  });
 }
 
 function playSuccessSound() {
@@ -60,7 +68,8 @@ const labels = {
   idle: "Idle", acquired: "Number acquired", ready_pending: "Confirming readiness",
   waiting_for_sms: "Waiting for SMS", resend_required: "Resend required",
   cancellation_pending: "Cancelling", code_notification_pending: "Delivering code",
-  code_delivered: "Completing", completed: "Completed", cancelled: "Cancelled", failed: "Failed"
+  code_delivered: "Completing", completed: "Completed", cancelled: "Cancelled", failed: "Failed",
+  searching: "Searching"
 };
 
 function duration(seconds) {
@@ -78,15 +87,20 @@ function setText(element, value) {
 function render(status) {
   const phase = status.phase || "idle";
 
-  // Detect phase transitions and play sounds
+  // Sounds are driven by explicit server state so retry audio plays before purchase.
   if (lastPhase !== null) {
-    if (phase === "waiting_for_sms" && lastPhase !== "waiting_for_sms") {
-      playRetrySound();
-    } else if (phase === "completed" && lastPhase !== "completed") {
+    if (phase === "completed" && lastPhase !== "completed") {
       playSuccessSound();
     }
   }
   lastPhase = phase;
+  if (
+    status.autoRetryStage === "announcing"
+    && (lastAutoRetrySignal === null || status.autoRetrySignal > lastAutoRetrySignal)
+  ) {
+    playRetryAndAcknowledge(status.autoRetrySignal);
+  }
+  lastAutoRetrySignal = status.autoRetrySignal || 0;
 
   elements["status-card"].className = `card status-card state-${phase}`;
   setText(elements.phase, labels[phase] || phase.replaceAll("_", " "));
@@ -95,7 +109,7 @@ function render(status) {
   setText(elements.elapsed, duration(status.elapsedSeconds));
   setText(elements.countdown, status.activationId
     ? `${duration(status.timeoutRemainingSeconds)} remaining`
-    : "No active timeout");
+    : status.isPollingForNumber ? "Checking availability" : "No active timeout");
   setText(elements["last-error"], status.lastError || "");
   visible(elements["last-error"], Boolean(status.lastError));
   copyValues = {
@@ -110,11 +124,42 @@ function render(status) {
   visible(elements.purchase, status.canPurchase);
   visible(elements.cancel, status.canCancel);
   visible(elements.retry, status.canRetry);
+  const requestsSent = Number(status.acquisitionRequests || 0);
+  const noNumberResponses = Number(status.noNumberResponses || 0);
+  const searching = Boolean(status.isPollingForNumber);
+  setText(elements["search-state"], searching ? "Searching Grizzly" : "Not searching");
+  elements["search-state"].classList.toggle("searching", searching);
+  setText(
+    elements["search-summary"],
+    requestsSent
+      ? `${requestsSent} request${requestsSent === 1 ? "" : "s"} sent, ${noNumberResponses} unavailable`
+      : "No requests sent"
+  );
+  setText(elements["search-service"], status.service || "-");
+  setText(elements["search-country"], status.country || "-");
+  setText(elements["search-max-price"], status.maxPrice || "-");
+  setText(elements["search-provider-ids"], status.providerIds || "Any provider");
 
   // Sync auto-retry toggle state
   if (elements["auto-retry-toggle"].checked !== status.autoRetryEnabled) {
     elements["auto-retry-toggle"].checked = status.autoRetryEnabled;
   }
+  setText(elements["auto-retry-label"], status.autoRetryEnabled ? "On" : "Off");
+  const timeoutMinutes = Math.round((status.autoRetryTimeoutSeconds || 180) / 60);
+  const delaySeconds = status.autoRetryDelaySeconds || 5;
+  const soundLeadSeconds = status.autoRetrySoundLeadSeconds || 3;
+  let automationDescription = `Cancel after ${timeoutMinutes} minutes without an SMS, wait ${delaySeconds} seconds, then try another number.`;
+  if (status.autoRetryEnabled && status.canPurchase) {
+    automationDescription = "Enabled for your next purchase. Click Get another number to start.";
+  } else if (status.autoRetryStage === "delay") {
+    automationDescription = `Waiting ${delaySeconds} seconds before the retry alert.`;
+  } else if (status.autoRetryStage === "announcing") {
+    automationDescription = `Retry alert sent. Next purchase starts in ${soundLeadSeconds} seconds.`;
+  }
+  setText(
+    elements["auto-retry-description"],
+    automationDescription
+  );
 
   const nextEventsSignature = JSON.stringify(status.events);
   if (eventsSignature !== nextEventsSignature) {
@@ -156,17 +201,60 @@ function escapeHtml(value) {
   return node.innerHTML;
 }
 
-async function refresh() {
+async function refresh(force = false) {
+  if (refreshController && !force) return;
+  if (refreshController) refreshController.abort();
+  const controller = new AbortController();
+  refreshController = controller;
+  const sequence = ++refreshSequence;
   try {
-    const response = await fetch("/api/status", {headers: {"Accept": "application/json"}});
+    const response = await fetch("/api/status", {
+      headers: {"Accept": "application/json"},
+      signal: controller.signal
+    });
     if (response.status === 401) { window.location = "/login"; return; }
     if (!response.ok) throw new Error("Status request failed");
-    render(await response.json());
+    const status = await response.json();
+    if (sequence < appliedRefreshSequence) return;
+    appliedRefreshSequence = sequence;
+    render(status);
     elements.connection.textContent = "Connected";
     elements.connection.classList.add("online");
   } catch (error) {
+    if (error.name === "AbortError") return;
+    if (sequence < appliedRefreshSequence) return;
+    appliedRefreshSequence = sequence;
     elements.connection.textContent = "Disconnected";
     elements.connection.classList.remove("online");
+  } finally {
+    if (refreshController === controller) refreshController = null;
+  }
+}
+
+async function acknowledgeRetrySound(signal) {
+  try {
+    await fetch("/api/actions/ack-retry-sound", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({signal})
+    });
+  } catch (error) {
+    // The server has a timeout fallback when the browser cannot acknowledge.
+  }
+}
+
+async function playRetryAndAcknowledge(signal) {
+  try {
+    const claim = await fetch("/api/actions/claim-retry-sound", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({signal})
+    });
+    if (!claim.ok) return;
+    await playRetrySound();
+    await acknowledgeRetrySound(signal);
+  } catch (error) {
+    console.error("Retry sound could not be played:", error);
   }
 }
 
@@ -181,10 +269,10 @@ async function postAction(path, body = {}) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Action failed");
     showToast(payload.message || "Action accepted");
-    await refresh();
   } catch (error) {
     showToast(error.message);
   } finally {
+    await refresh(true);
     document.querySelectorAll("button").forEach(button => button.disabled = false);
   }
 }
@@ -236,7 +324,13 @@ elements.cancel.addEventListener("click", () => confirmAction(
   () => postAction("/api/actions/cancel", {confirm: true})
 ));
 elements.retry.addEventListener("click", () => postAction("/api/actions/retry"));
-elements["auto-retry-toggle"].addEventListener("change", () => postAction("/api/actions/toggle-auto-retry"));
+elements["auto-retry-toggle"].addEventListener("change", async () => {
+  const enabled = elements["auto-retry-toggle"].checked;
+  elements["auto-retry-toggle"].disabled = true;
+  try { await getAudioContext().resume(); } catch (error) { /* Audio remains optional. */ }
+  await postAction("/api/actions/auto-retry", {enabled});
+  elements["auto-retry-toggle"].disabled = false;
+});
 elements["copy-full"].addEventListener("click", () => copyToClipboard(copyValues.full, "International number"));
 elements["copy-national"].addEventListener("click", () => copyToClipboard(copyValues.national, "National number"));
 elements["copy-sms"].addEventListener("click", () => copyToClipboard(copyValues.sms, "Verification code"));
@@ -250,5 +344,8 @@ document.getElementById("logout").addEventListener("click", async () => {
 });
 
 applyTheme(document.documentElement.dataset.theme || "dark");
+document.addEventListener("pointerdown", () => {
+  try { getAudioContext().resume(); } catch (error) { /* Audio remains optional. */ }
+}, {once: true});
 refresh();
 window.setInterval(refresh, 2000);

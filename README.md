@@ -52,6 +52,12 @@ code, and supports persistent light and dark themes. Codes also continue to use
 Discord and optional ntfy. Never delete the SQLite volume to skip an activation
 because that can leave the paid activation active at Grizzly.
 
+When a purchase is in progress but no number has been acquired, the dashboard
+shows **Searching** rather than **Idle**. Its inventory-search panel shows live
+request and no-match counts plus the service, country, maximum price, and allowed
+provider IDs sent to Grizzly. An empty provider filter is displayed as **Any
+provider**.
+
 ### Activation History
 
 New purchases are recorded permanently in the dashboard with their phone number,
@@ -78,7 +84,7 @@ sound in the browser, and acquires a new number. The loop continues until either
 
 The retry sound plays only while the dashboard tab is open. Enable it via the
 `AUTO_RETRY_ENABLED` environment variable or toggle it at runtime from the
-dashboard header.
+automatic replacement panel in the current activation card.
 
 ## Quick Start
 
@@ -107,6 +113,7 @@ WEB_UI_PORT=8080
 AUTO_RETRY_ENABLED=false
 AUTO_RETRY_TIMEOUT_SECONDS=180
 AUTO_RETRY_DELAY_SECONDS=5
+AUTO_RETRY_SOUND_LEAD_SECONDS=5
 
 MAX_REQUESTS_PER_SECOND=2
 REQUEST_TIMEOUT_SECONDS=10
@@ -167,7 +174,7 @@ be overridden in `.env`.
 | `NTFY_MAX_RETRIES` | no | ntfy notification attempts for network, 429, and 5xx errors. Defaults to `5`. |
 | `MAX_REQUESTS_PER_SECOND` | yes | Maximum number-acquisition request rate. |
 | `REQUEST_TIMEOUT_SECONDS` | yes | HTTP request timeout. |
-| `STATUS_EVERY_REQUESTS` | no | Progress log frequency. Defaults to `100`. |
+| `STATUS_EVERY_REQUESTS` | no | Acquisition progress frequency after the first request. Progress appears in Docker logs and the dashboard activity feed. Defaults to `100`. |
 | `SMS_POLL_SECONDS` | no | Delay between SMS-status polls. Defaults to `5`. |
 | `ACTIVATION_TIMEOUT_SECONDS` | no | Maximum wait for an SMS. Defaults to `900`. |
 | `STATE_DB_PATH` | no | SQLite state path. Docker defaults to `/data/grizzlysms.db`. |
@@ -181,6 +188,7 @@ be overridden in `.env`.
 | `AUTO_RETRY_ENABLED` | no | Enable automatic retry after timeout. Defaults to `false`. |
 | `AUTO_RETRY_TIMEOUT_SECONDS` | no | Timeout before auto-retry cancels. Defaults to `180`. |
 | `AUTO_RETRY_DELAY_SECONDS` | no | Delay between cancellation and next attempt. Defaults to `5`. |
+| `AUTO_RETRY_SOUND_LEAD_SECONDS` | no | Maximum wait for the browser retry alert before the next purchase. Defaults to `5`. |
 
 Set `WEB_UI=false` to retain headless behavior: the process immediately looks for
 one number, follows its lifecycle, and exits after completion or failure.
